@@ -53,6 +53,46 @@ uint16_t LogarithmicRegressionCalculator::calc(uint16_t x) {
   return y;
 }
 
+// Moving average calculator to smooth readings.
+// This is all done in integer (long) arithmatic so no rounding errors (we
+// hope!).
+class MovingAverageCalculator {
+ public:
+  MovingAverageCalculator(int readings);
+  void sample(int input);
+  int current_average();
+
+ private:
+  void MovingAverageCalculator::new_reading(int input);
+  long total;
+  int num_readings;
+  boolean init;
+};
+
+MovingAverageCalculator::MovingAverageCalculator(int readings) {
+  this->total = 0;
+  this->num_readings = readings;
+  this->init = false;
+}
+void MovingAverageCalculator::sample(int input) {
+  if (!init) {
+    init = true;
+    this->total = input;
+    this->total *= this->num_readings;
+  } else {
+    // Update running total by subtracting the current average & replacing with
+    // that passed in.
+
+    this->total -= this->current_average();
+    this->total += input;
+  }
+}
+
+// Return current moving average
+int MovingAverageCalculator::current_average() {
+  return this->total / this->num_readings;
+}
+
 //////////////////////////////////////////////////////////////////////////////
 // To calculate an Indoor Air Quality (IAQ) index from 0-500...
 //
@@ -129,22 +169,55 @@ bool check_i2c_write(uint8_t iAddr, uint8_t *pData, int iLen,
   return ret;
 }
 
+static uint8_t crc8(const uint8_t *data, int len) {
+  /*
+
+     CRC-8 formula from page 14 of SHT spec pdf
+
+     Test data 0xBE, 0xEF should yield 0x92
+
+     Initialization data 0xFF
+     Polynomial 0x31 (x8 + x5 +x4 +1)
+     Final XOR 0x00
+  */
+
+  const uint8_t POLYNOMIAL(0x31);
+  uint8_t crc(0xFF);
+
+  for (int j = len; j; --j) {
+    crc ^= *data++;
+
+    for (int i = 8; i; --i) {
+      crc = (crc & 0x80) ? (crc << 1) ^ POLYNOMIAL : (crc << 1);
+    }
+  }
+  return crc;
+}
+
 //////////////////////////////////////////////////////////////////////////////
 // SGP30 Stuff
-
-unsigned long sgp30_next_measure_iaq;
-unsigned long sgp30_next_get_iaq_baseline;
-uint16_t sgp30_eco2;
-uint16_t sgp30_tvoc;
-
-uint16_t sgp30_iaq_baseline_eco2;
-uint16_t sgp30_iaq_baseline_tvoc;
 
 // After the “sgp30_iaq_init” command, a “sgp30_measure_iaq” command has to be
 // sent in regular intervals of 1s to ensure proper operation of the dynamic
 // baseline compensation algorithm.
 // So this is a constant & cannot be changed.
 #define SGP30_MEASURE_IAQ_PERIOD 1000
+
+unsigned long sgp30_next_measure_iaq;
+unsigned long sgp30_next_get_iaq_baseline;
+
+// SGP30 sensor can return 'spikey' readings so 2-3 minutes is a good moving
+// average period to smooth them. So let's use 2 minutes.
+
+#define SGP30_MA_SAMPLES 120000 / SGP30_MEASURE_IAQ_PERIOD
+
+MovingAverageCalculator *sgp30_eco2_ma =
+    new MovingAverageCalculator(SGP30_MA_SAMPLES);
+MovingAverageCalculator *sgp30_tvoc_ma =
+    new MovingAverageCalculator(SGP30_MA_SAMPLES);
+
+uint16_t sgp30_iaq_baseline_eco2;
+uint16_t sgp30_iaq_baseline_tvoc;
 
 // Period to get/save baseline - 12 hours
 #define SGP30_GET_IAQ_BASELINE_PERIOD 43200000
@@ -224,6 +297,7 @@ void sgp30_serial() {
         }
         Serial.print(readbuffer[lp], HEX);
       }
+      Serial.print("\n");
 #endif
 
       // Check CRCs...
@@ -336,7 +410,7 @@ void sgp30_measure_iaq() {
 #endif
         status_flash(1000);
       } else {
-        sgp30_eco2 = decode_uint16_t(&readbuffer[0]);
+        sgp30_eco2_ma->sample(decode_uint16_t(&readbuffer[0]));
       }
 
       if (crc8(&readbuffer[3], 2) != readbuffer[5]) {
@@ -345,28 +419,53 @@ void sgp30_measure_iaq() {
 #endif
         status_flash(1000);
       } else {
-        sgp30_tvoc = decode_uint16_t(&readbuffer[3]);
+        sgp30_tvoc_ma->sample(decode_uint16_t(&readbuffer[3]));
       }
 
 #ifdef DEBUG
-      Serial.print("Read SGP30: ");
-      Serial.print(sgp30_eco2);
+      Serial.print("Read SGP30:\t");
+      Serial.print(decode_uint16_t(&readbuffer[0]));
       Serial.print("\t");
-      Serial.print(sgp30_tvoc);
-#endif
-
-      // Calculate IAQ indexes and use the highest one.
-
-      uint16_t iaq_eco2 = LR_CO2->calc(sgp30_eco2);
-      uint16_t iaq_tvoc = LR_TVOC->calc(sgp30_tvoc);
-#ifdef DEBUG
-      Serial.print("\tIAQ CO2: ");
-      Serial.print(iaq_eco2);
-      Serial.print("\tIAQ TVOC: ");
-      Serial.println(iaq_tvoc);
+      Serial.print(decode_uint16_t(&readbuffer[3]));
+      Serial.print("\tMAs:\t");
+      Serial.print(sgp30_eco2_ma->current_average());
+      Serial.print("\t");
+      Serial.print(sgp30_tvoc_ma->current_average());
+      Serial.print("\n");
 #endif
     }
   }
+}
+
+// Shamelessly copied from Adafruit examples... ahem... ;)
+// return absolute humidity [mg/m^3] with approximation formula
+// @param temperature [°C]
+// @param humidity [%RH]
+
+uint32_t getAbsoluteHumidity(float temperature, float humidity) {
+  // approximation formula from Sensirion SGP30 Driver Integration chapter 3.15
+  const float absoluteHumidity =
+      216.7f * ((humidity / 100.0f) * 6.112f *
+                exp((17.62f * temperature) / (243.12f + temperature)) /
+                (273.15f + temperature));  // [g/m^3]
+  const uint32_t absoluteHumidityScaled =
+      static_cast<uint32_t>(1000.0f * absoluteHumidity);  // [mg/m^3]
+  return absoluteHumidityScaled;
+}
+
+// Calculate our IAQ
+uint16_t sgp30_calc_iaq() {
+  // Calculate both and use the highest one.
+  uint16_t iaq_eco2 = LR_CO2->calc(sgp30_eco2_ma->current_average());
+  uint16_t iaq_tvoc = LR_TVOC->calc(sgp30_tvoc_ma->current_average());
+
+#ifdef DEBUG
+  Serial.print("IAQ CO2: ");
+  Serial.print(iaq_eco2);
+  Serial.print("\tIAQ TVOC: ");
+  Serial.println(iaq_tvoc);
+#endif
+  return iaq_eco2 > iaq_tvoc ? iaq_eco2 : iaq_tvoc;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -374,11 +473,18 @@ void sgp30_measure_iaq() {
 
 #define SHT31_I2C_ADDRESS 0x44
 bool have_sht31 = false;
-int16_t sht31_temperature;
-int16_t sht31_humidity;
 
 unsigned long sht31_nextRead;
-const unsigned long sht31_period = 5000;  // TODO: should come from register
+const unsigned long sht31_period = 5000;  // TODO: should come from register.
+
+// 30 second moving average for temperature/humidity. TODO: should come from
+// register.
+#define SHT31_MA_SAMPLES 30000 / sht31_period
+
+MovingAverageCalculator *sht31_temperature_ma =
+    new MovingAverageCalculator(SHT31_MA_SAMPLES);
+MovingAverageCalculator *sht31_humidity_ma =
+    new MovingAverageCalculator(SHT31_MA_SAMPLES);
 
 void sht31_setup() {
 #ifdef DEBUG
@@ -418,31 +524,6 @@ uint8_t SHT31_HEATEREN[] = {0x30, 0x6D};  /* Heater Enable */
 uint8_t SHT31_HEATERDIS[] = {0x30, 0x66}; /* Heater Disable */
 #define SHT31_REG_MSB_HEATER_BITMASK 0x20 /* Status Register Heater Bit */
 
-static uint8_t crc8(const uint8_t *data, int len) {
-  /*
-
-     CRC-8 formula from page 14 of SHT spec pdf
-
-     Test data 0xBE, 0xEF should yield 0x92
-
-     Initialization data 0xFF
-     Polynomial 0x31 (x8 + x5 +x4 +1)
-     Final XOR 0x00
-  */
-
-  const uint8_t POLYNOMIAL(0x31);
-  uint8_t crc(0xFF);
-
-  for (int j = len; j; --j) {
-    crc ^= *data++;
-
-    for (int i = 8; i; --i) {
-      crc = (crc & 0x80) ? (crc << 1) ^ POLYNOMIAL : (crc << 1);
-    }
-  }
-  return crc;
-}
-
 bool sht31_isHeaterEnabled() {
   if (check_i2c_write(SHT31_I2C_ADDRESS, SHT31_READSTATUS,
                       sizeof(SHT31_READSTATUS), 20)) {
@@ -478,10 +559,6 @@ void sht31_Heater(bool heater_on) {
 }
 
 void sht31_read() {
-  // Blank out to be sure we only use actual readings
-  sht31_temperature = NAN;
-  sht31_humidity = NAN;
-
   // Make sure heater is always off
   if (sht31_isHeaterEnabled()) {
 #ifdef DEBUG
@@ -504,33 +581,34 @@ void sht31_read() {
 #endif
         status_flash(500);
       } else {
+        // Calculations take from Adafruit library
         int32_t stemp =
             (int32_t)(((uint32_t)readbuffer[0] << 8) | readbuffer[1]);
         // simplified (65536 instead of 65535) integer version of:
         // temp = (stemp * 175.0f) / 65535.0f - 45.0f;
         stemp = ((4375 * stemp) >> 14) - 4500;
-        sht31_temperature = stemp;
+        // Test negative temperatures
+        // stemp -= 5000;
+        sht31_temperature_ma->sample(stemp);
 
         uint32_t shum = ((uint32_t)readbuffer[3] << 8) | readbuffer[4];
         // simplified (65536 instead of 65535) integer version of:
         // humidity = (shum * 100.0f) / 65535.0f;
         shum = (625 * shum) >> 12;
-        sht31_humidity = shum;
-      }
-    }
+        sht31_humidity_ma->sample(shum);
 
-    if (isnan(sht31_temperature) || isnan(sht31_humidity)) {
 #ifdef DEBUG
-      Serial.println("Failed to read SHT31");
+        Serial.print("Read SHT31:\t");
+        Serial.print(stemp);
+        Serial.print("\t");
+        Serial.print(shum);
+        Serial.print("\tMAs:\t");
+        Serial.print(sht31_temperature_ma->current_average());
+        Serial.print("\t");
+        Serial.print(sht31_humidity_ma->current_average());
+        Serial.print("\n");
 #endif
-      status_flash(1000);
-    } else {
-#ifdef DEBUG
-      Serial.print("Read SHT31: ");
-      Serial.print(sht31_temperature);
-      Serial.print(" ");
-      Serial.println(sht31_humidity);
-#endif
+      }
     }
   }
 }
@@ -546,9 +624,10 @@ void sht31_read() {
 
 #define modbusRxPin 16
 #define modbusTxPin 17
-#define modbusId 1  // TODO: should be register
-const unsigned long baud = 9600; // TODO: should be register
-const word bufSize = 256, numInputRegisters = 4, sensorAddress = 0;
+#define modbusId 1                // TODO: should be register
+const unsigned long baud = 9600;  // TODO: should be register
+#define MODBUS_INPUT_REGISTERS 25
+const word bufSize = 256;
 
 // This is the buffer for the ModbusRTUSlave object.
 // It is used to store the Modbus messages.
@@ -570,24 +649,38 @@ void modbus_setup() {
   modbus.begin(modbusId, baud);
 
   // Configure the inputRegister(s).
-  modbus.configureInputRegisters(numInputRegisters, inputRegisterRead);
+  modbus.configureInputRegisters(MODBUS_INPUT_REGISTERS, inputRegisterRead);
 }
 
 // This is a funciton that will be passed to the ModbusRTUSlave for reading
 // input registers.
-int16_t inputRegisterRead(word address) {
-  // TODO: Add real code
+long inputRegisterRead(word address) {
+#ifdef DEBUG
+  Serial.print("inputRegisterRead : ");
+  Serial.println(address);
+#endif
+
+  // TODO: Clean up?
   switch (address) {
-    case 0:
-      return sht31_temperature;
-    case 1:
-      return sht31_humidity;
-    case 2:
-      return false;
-    case 3:
-      return 42;
+    case 10:
+      return (uint16_t)sht31_temperature_ma->current_average();
+    case 11:
+      return sht31_humidity_ma->current_average();
+    case 12:
+      return (uint16_t)(-10);
+    case 13:
+      return 32768;
+    case 22:
+      return sgp30_eco2_ma->current_average();
+    case 23:
+      return sgp30_tvoc_ma->current_average();
+    case 24:
+      return sgp30_calc_iaq();
   }
-  return false;
+#ifdef DEBUG
+  Serial.println("Nothing!");
+#endif
+  return NAN;
 }
 
 //////////////////////////////////////////////////////////////////////////////
