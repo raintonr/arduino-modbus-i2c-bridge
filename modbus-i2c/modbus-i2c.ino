@@ -61,10 +61,12 @@ class MovingAverageCalculator {
   MovingAverageCalculator(int readings);
   void sample(int input);
   int current_average();
+  int current_sample();
 
  private:
   void MovingAverageCalculator::new_reading(int input);
   long total;
+  int last_sample;
   int num_readings;
   boolean init;
 };
@@ -86,12 +88,16 @@ void MovingAverageCalculator::sample(int input) {
     this->total -= this->current_average();
     this->total += input;
   }
+  this->last_sample = input;
 }
 
 // Return current moving average
 int MovingAverageCalculator::current_average() {
   return this->total / this->num_readings;
 }
+
+// Return last value sampled
+int MovingAverageCalculator::current_sample() { eturn this->last_sample; }
 
 //////////////////////////////////////////////////////////////////////////////
 // To calculate an Indoor Air Quality (IAQ) index from 0-500...
@@ -424,9 +430,9 @@ void sgp30_measure_iaq() {
 
 #ifdef DEBUG
       Serial.print("Read SGP30:\t");
-      Serial.print(decode_uint16_t(&readbuffer[0]));
+      Serial.print(sgp30_eco2_ma->current_sample());
       Serial.print("\t");
-      Serial.print(decode_uint16_t(&readbuffer[3]));
+      Serial.print(sgp30_tvoc_ma->current_sample());
       Serial.print("\tMAs:\t");
       Serial.print(sgp30_eco2_ma->current_average());
       Serial.print("\t");
@@ -454,10 +460,10 @@ uint32_t getAbsoluteHumidity(float temperature, float humidity) {
 }
 
 // Calculate our IAQ
-uint16_t sgp30_calc_iaq() {
+int sgp30_calc_iaq(int eco2, int tvoc) {
   // Calculate both and use the highest one.
-  uint16_t iaq_eco2 = LR_CO2->calc(sgp30_eco2_ma->current_average());
-  uint16_t iaq_tvoc = LR_TVOC->calc(sgp30_tvoc_ma->current_average());
+  int iaq_eco2 = LR_CO2->calc(eco2);
+  int iaq_tvoc = LR_TVOC->calc(tvoc);
 
 #ifdef DEBUG
   Serial.print("IAQ CO2: ");
@@ -663,19 +669,28 @@ long inputRegisterRead(word address) {
   // TODO: Clean up?
   switch (address) {
     case 10:
-      return (uint16_t)sht31_temperature_ma->current_average();
+      return (uint16_t)sht31_temperature_ma->current_sample();
     case 11:
-      return sht31_humidity_ma->current_average();
+      return sht31_humidity_ma->current_sample();
     case 12:
-      return (uint16_t)(-10);
+      return (uint16_t)sht31_temperature_ma->current_average();
     case 13:
-      return 32768;
+      return sht31_humidity_ma->current_average();
     case 22:
-      return sgp30_eco2_ma->current_average();
+      return sgp30_eco2_ma->current_sample();
     case 23:
-      return sgp30_tvoc_ma->current_average();
+      return sgp30_tvoc_ma->current_sample();
     case 24:
-      return sgp30_calc_iaq();
+      return sgp30_calc_iaq(sgp30_eco2_ma->current_sample(),
+                            sgp30_tvoc_ma->current_sample());
+    case 25:
+      return sgp30_eco2_ma->current_average();
+    case 26:
+      return sgp30_tvoc_ma->current_average();
+    case 27:
+      return sgp30_calc_iaq(sgp30_eco2_ma->current_average(),
+                            sgp30_tvoc_ma->current_average());
+      ;
   }
 #ifdef DEBUG
   Serial.println("Nothing!");
