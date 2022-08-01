@@ -313,7 +313,7 @@ void sgp30_serial() {
 #ifdef DEBUG
         Serial.println("Bad CRC");
 #endif
-        status_flash(1000);
+        status_flash(500);
       } else {
         // Copy/store serial if changed...
       }
@@ -545,7 +545,7 @@ bool sht31_isHeaterEnabled() {
 #ifdef DEBUG
         Serial.println("Bad CRC");
 #endif
-        status_flash(1000);
+        status_flash(500);
         return 0;
       } else {
         return (readbuffer[0] & SHT31_REG_MSB_HEATER_BITMASK);
@@ -571,49 +571,50 @@ void sht31_read() {
     Serial.println("SHT31 heater is on - turning off");
 #endif
     sht31_Heater(false);
-    // And wait for 30s
-    status_flash(30000);
-  }
-
-  /* Measurement High Repeatability with Clock Stretch Disabled */
-  if (check_i2c_write(SHT31_I2C_ADDRESS, SHT31_MEAS_HIGHREP,
-                      sizeof(SHT31_MEAS_HIGHREP), 20)) {
-    if (I2CRead(&bbi2c, SHT31_I2C_ADDRESS, readbuffer, sizeof(readbuffer))) {
-      // Stolen from Adafruit library
-      if (readbuffer[2] != crc8(readbuffer, 2) ||
-          readbuffer[5] != crc8(readbuffer + 3, 2)) {
+    // Make sure we don't read again for another 30s
+    sht31_nextRead = millis() + 30000;
+    status_flash(250);
+  } else {
+    /* Measurement High Repeatability with Clock Stretch Disabled */
+    if (check_i2c_write(SHT31_I2C_ADDRESS, SHT31_MEAS_HIGHREP,
+                        sizeof(SHT31_MEAS_HIGHREP), 20)) {
+      if (I2CRead(&bbi2c, SHT31_I2C_ADDRESS, readbuffer, sizeof(readbuffer))) {
+        // Stolen from Adafruit library
+        if (readbuffer[2] != crc8(readbuffer, 2) ||
+            readbuffer[5] != crc8(readbuffer + 3, 2)) {
 #ifdef DEBUG
-        Serial.println("Bad SHT31 CRC");
+          Serial.println("Bad SHT31 CRC");
 #endif
-        status_flash(500);
-      } else {
-        // Calculations take from Adafruit library
-        int32_t stemp =
-            (int32_t)(((uint32_t)readbuffer[0] << 8) | readbuffer[1]);
-        // simplified (65536 instead of 65535) integer version of:
-        // temp = (stemp * 175.0f) / 65535.0f - 45.0f;
-        stemp = ((4375 * stemp) >> 14) - 4500;
-        // Test negative temperatures
-        // stemp -= 5000;
-        sht31_temperature_ma->sample(stemp);
+          status_flash(500);
+        } else {
+          // Calculations take from Adafruit library
+          int32_t stemp =
+              (int32_t)(((uint32_t)readbuffer[0] << 8) | readbuffer[1]);
+          // simplified (65536 instead of 65535) integer version of:
+          // temp = (stemp * 175.0f) / 65535.0f - 45.0f;
+          stemp = ((4375 * stemp) >> 14) - 4500;
+          // Test negative temperatures
+          // stemp -= 5000;
+          sht31_temperature_ma->sample(stemp);
 
-        uint32_t shum = ((uint32_t)readbuffer[3] << 8) | readbuffer[4];
-        // simplified (65536 instead of 65535) integer version of:
-        // humidity = (shum * 100.0f) / 65535.0f;
-        shum = (625 * shum) >> 12;
-        sht31_humidity_ma->sample(shum);
+          uint32_t shum = ((uint32_t)readbuffer[3] << 8) | readbuffer[4];
+          // simplified (65536 instead of 65535) integer version of:
+          // humidity = (shum * 100.0f) / 65535.0f;
+          shum = (625 * shum) >> 12;
+          sht31_humidity_ma->sample(shum);
 
 #ifdef DEBUG
-        Serial.print("Read SHT31:\t");
-        Serial.print(stemp);
-        Serial.print("\t");
-        Serial.print(shum);
-        Serial.print("\tMAs:\t");
-        Serial.print(sht31_temperature_ma->current_average());
-        Serial.print("\t");
-        Serial.print(sht31_humidity_ma->current_average());
-        Serial.print("\n");
+          Serial.print("Read SHT31:\t");
+          Serial.print(stemp);
+          Serial.print("\t");
+          Serial.print(shum);
+          Serial.print("\tMAs:\t");
+          Serial.print(sht31_temperature_ma->current_average());
+          Serial.print("\t");
+          Serial.print(sht31_humidity_ma->current_average());
+          Serial.print("\n");
 #endif
+        }
       }
     }
   }
@@ -719,10 +720,10 @@ void setup() {
 void loop() {
   // Poll for Modbus RTU requests from the master device.
   // This will autmatically run the inputRegisterRead function as needed.
+  // Interleave with I2C stuff...
+
   modbus.poll();
-
-  // Periodically read I2C stuff...
-
   sht31_loop();
+  modbus.poll();
   sgp30_loop();
 }
