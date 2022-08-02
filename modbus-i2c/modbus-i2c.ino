@@ -6,7 +6,7 @@
 
 #define SOFTWARE_VERSION 1
 
-#define DEBUG
+#undef DEBUG
 
 //////////////////////////////////////////////////////////////////////////////
 // Stuff we need to store in EEPROM with default values
@@ -84,6 +84,10 @@ uint16_t LogarithmicRegressionCalculator::calc(uint16_t x) {
 // Moving average calculator to smooth readings.
 // This is all done in integer (long) arithmetic so no rounding errors (we
 // hope!).
+//
+// This is a template because sometimes we want signed, sometimes unsigned data
+// and to always store the correct type to save space (rather than using a long
+// for example).
 
 template <class statType>
 class StatsCalc {
@@ -113,9 +117,8 @@ class StatsCalc {
   uint16_t delta_num_samples = 0;
 
   statType *delta_samples;
-  int delta_current_slot;
-  int delta_next_slot(int slot);
-  int delta_prev_slot(int slot);
+  uint16_t delta_current_slot;
+  uint16_t delta_next_slot();
   bool delta_init = false;
 };
 
@@ -224,8 +227,7 @@ void StatsCalc<statType>::sample(statType input) {
       }
       this->delta_current_slot = 0;
     } else {
-      this->delta_current_slot =
-          this->delta_next_slot(this->delta_current_slot);
+      this->delta_current_slot = this->delta_next_slot();
       this->delta_samples[this->delta_current_slot] = input;
     }
   }
@@ -253,16 +255,13 @@ statType StatsCalc<statType>::current_sample() {
 template <class statType>
 int16_t StatsCalc<statType>::current_delta() {
   return this->last_sample -
-         this->delta_samples[this->delta_next_slot(this->delta_current_slot)];
+         this->delta_samples[this->delta_next_slot()];
 }
 
 template <class statType>
-int StatsCalc<statType>::delta_next_slot(int slot) {
+uint16_t StatsCalc<statType>::delta_next_slot() {
+  uint16_t slot = this->delta_current_slot;
   return (++slot) % this->delta_num_samples;
-}
-template <class statType>
-int StatsCalc<statType>::delta_prev_slot(int slot) {
-  return (slot > 0) ? (slot - 1) : (this->delta_num_samples - 1);
 }
 
 //////////////////////////////////////////////////////////////////////////////
