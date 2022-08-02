@@ -4,7 +4,33 @@
 // - Adafruit SHT31
 // - Adafruit SGP30
 
+#define SOFTWARE_VERSION 1
+
 #define DEBUG
+
+//////////////////////////////////////////////////////////////////////////////
+// Stuff we need to store in EEPROM with default values
+
+#include <EEPROM-Storage.h>
+
+// Start at zero and everything is 2 bytes + 1 check = 3 in total
+
+EEPROMStorage<uint16_t> modbus_id(0, 1);
+EEPROMStorage<uint16_t> modbus_baud_rate(3, 9600);
+EEPROMStorage<uint16_t> sht31_period(6, 1000);
+EEPROMStorage<uint16_t> sht31_ma_period(9, 30);
+EEPROMStorage<uint16_t> sht31_delta_period(12, 30);
+EEPROMStorage<uint16_t> sgp30_period(15, 1000);
+EEPROMStorage<uint16_t> sgp30_ma_period(18, 120);
+
+// Store each part of the serial individually. Bit clunky, but EEPROM-Storage
+// does not support arrays.
+EEPROMStorage<uint16_t> sgp30_serial_1(21, 0);
+EEPROMStorage<uint16_t> sgp30_serial_2(24, 0);
+EEPROMStorage<uint16_t> sgp30_serial_3(27, 0);
+
+EEPROMStorage<uint16_t> sgp30_iaq_baseline_eco2(30, 0);
+EEPROMStorage<uint16_t> sgp30_iaq_baseline_tvoc(33, 0);
 
 //////////////////////////////////////////////////////////////////////////////
 // Misc stuff
@@ -19,10 +45,10 @@ void status_flash(uint16_t ms) {
 }
 
 // Decode uint16_t from 2 byte buffer
-uint16_t decode_uint16_t(uint8_t readbuffer[2]) {
-  uint16_t out = readbuffer[0];
+uint16_t decode_uint16_t(uint8_t in[2]) {
+  uint16_t out = in[0];
   out <<= 8;
-  out |= readbuffer[1];
+  out |= in[1];
   return out;
 }
 
@@ -59,60 +85,98 @@ uint16_t LogarithmicRegressionCalculator::calc(uint16_t x) {
 // This is all done in integer (long) arithmetic so no rounding errors (we
 // hope!).
 
-// Find sample within 1s. TODO: make this a register?
-#define DELTA_SAMPLE_TOLERANCE 1000
-
-struct DeltaSample {
-  unsigned long timestamp;
-  int value;
-};
-
 class StatsCalc {
  public:
-  StatsCalc();
-  void init_moving_average(int num_readings);
-  void init_delta(unsigned long delta_period, int delta_num_samples);
-  void sample(int input);
+  void init_moving_average(uint16_t ma_period, uint16_t sample_period);
+  void init_delta(uint16_t delta_period, uint16_t sample_period);
+  void sample(long input);
   int current_sample();
   int current_average();
   int current_delta();
 
  private:
-  int last_sample;
+  long last_sample;
+
   // Moving Average Stuff
+  // Num readings are unsigned 16 bit because they come from Modbus registers.
+  uint16_t ma_num_readings = 0;
+
   long ma_total;
-  int ma_num_readings;
-  bool ma_init;
-  // Delta stuff
-  unsigned long delta_period;
-  int delta_num_samples;
-  struct DeltaSample *delta_samples;
+  bool ma_init = false;
+
+  // Delta stuff.
+  // Period and samples are unsigned 16 bit because they come from Modbus
+  // registers.
+  uint16_t delta_period = 0;
+  uint16_t delta_num_samples = 0;
+
+  long *delta_samples;
   int delta_current_slot;
   int delta_next_slot(int slot);
   int delta_prev_slot(int slot);
-  int StatsCalc::delta_find_slot(unsigned long old_stamp);
-  bool delta_init;
+  bool delta_init = false;
 };
 
-StatsCalc::StatsCalc() {
-  // Don't do anything unless told to
-  this->init_moving_average(0);
-  this->init_delta(0, 0);
+void StatsCalc::init_moving_average(uint16_t ma_period,
+                                    uint16_t sample_period) {
+#ifdef DEBUG
+  Serial.print("init_moving_average: ");
+  Serial.print(ma_period);
+  Serial.print("\t");
+  Serial.print(sample_period);
+  Serial.print("\t");
+#endif
+
+  // Delta period is in seconds, sample_period in ms
+  int ma_num_readings = ma_period / (sample_period / 1000);
+  // Always round up
+  ma_num_readings++;
+
+#ifdef DEBUG
+  Serial.println(ma_num_readings);
+#endif
+
+  if (this->ma_init && ma_num_readings != this->ma_num_readings) {
+#ifdef DEBUG
+    Serial.print("Re-initialising ma...");
+#endif
+    this->ma_init = false;
+  }
+
+  this->ma_num_readings = ma_num_readings;
 }
 
-void StatsCalc::init_moving_average(int num_readings) {
-  this->ma_num_readings = num_readings;
-  this->ma_init = false;
-}
+void StatsCalc::init_delta(uint16_t delta_period, uint16_t sample_period) {
+#ifdef DEBUG_MORE
+  Serial.print("init_delta: ");
+  Serial.print(delta_period);
+  Serial.print("\t");
+  Serial.print(sample_period);
+  Serial.print("\t");
+#endif
 
-// TODO: dynamically calculate delta_samples?
-void StatsCalc::init_delta(unsigned long delta_period, int delta_num_samples) {
+  // Delta period is in seconds, sample_period in ms
+  int delta_num_samples = delta_period / (sample_period / 1000);
+  // Always round up
+  delta_num_samples++;
+
+#ifdef DEBUG_MORE
+  Serial.println(delta_num_samples);
+#endif
+
+  if (this->delta_init && (delta_period != this->delta_period ||
+                           delta_num_samples != this->delta_num_samples)) {
+#ifdef DEBUG
+    Serial.print("Re-initialising delta...");
+#endif
+    free(this->delta_samples);
+    this->delta_init = false;
+  }
   this->delta_period = delta_period;
   this->delta_num_samples = delta_num_samples;
-  this->delta_init = false;
 }
 
-void StatsCalc::sample(int input) {
+void StatsCalc::sample(long input) {
   if (this->ma_num_readings > 0) {
     // Calculate moving average
     if (!ma_init) {
@@ -133,35 +197,35 @@ void StatsCalc::sample(int input) {
 
   if (this->delta_num_samples > 0) {
     // Stash for delta calculation
-    unsigned long now = millis();
+    unsigned long lsecs = millis() / 1000;
+    lsecs &= 0xFFFF;
+    uint16_t now = lsecs;
+
     if (!this->delta_init) {
 #ifdef DEBUG
       Serial.println("delta_init");
 #endif
       this->delta_init = true;
       // Just fill all slots with current data
-      int sample_buffer_size =
-          this->delta_num_samples * sizeof(struct DeltaSample);
-      this->delta_samples = (struct DeltaSample *)malloc(sample_buffer_size);
+      int sample_buffer_size = this->delta_num_samples * sizeof(long);
+      this->delta_samples = (long *)malloc(sample_buffer_size);
       if (this->delta_samples == NULL) {
         // Fatal error!
 #ifdef DEBUG
         Serial.print("Could not malloc: ");
         Serial.println(sample_buffer_size);
 #endif
-        status_flash(120000);
+        status_flash(-1);
       }
 
       for (int lp = 0; lp < this->delta_num_samples; lp++) {
-        this->delta_samples[lp].timestamp = now;
-        this->delta_samples[lp].value = input;
+        this->delta_samples[lp] = input;
       }
       this->delta_current_slot = 0;
     } else {
       this->delta_current_slot =
           this->delta_next_slot(this->delta_current_slot);
-      this->delta_samples[this->delta_current_slot].timestamp = now;
-      this->delta_samples[this->delta_current_slot].value = input;
+      this->delta_samples[this->delta_current_slot] = input;
     }
   }
 
@@ -178,64 +242,12 @@ int StatsCalc::current_average() {
 int StatsCalc::current_sample() { return this->last_sample; }
 
 // Delta stuff
-
-// You'd think that one could just use the oldest slot but... timing of all this
-// isn't guaranteed to be 'quick' so it's possible that it could delay things
-// and that we should use one of the previous slots.
-//
-// Yes, this is a little convoluted/complicated but really - what else is this
-// CPU gonna be doing? ;)
+// The oldest slot *should* store the delta we're looking for so just use that
+// for calculation.
 
 int StatsCalc::current_delta() {
-  int out = 0;
-
-  // We need a reading which is older than last sample by period ms.
-  unsigned long old_stamp =
-      this->delta_samples[this->delta_current_slot].timestamp -
-      this->delta_period;
-
-#ifdef DEBUG_MORE
-  Serial.print("Last reading: ");
-  Serial.print(this->delta_samples[this->delta_current_slot].timestamp);
-  Serial.print("\tslot: ");
-  Serial.print(this->delta_current_slot);
-  Serial.print("\tlooking for reading around: ");
-  Serial.print(old_stamp);
-  Serial.print("\tin: ");
-  Serial.print(this->delta_num_samples);
-  Serial.println(" slots");
-#endif
-
-  bool found_slot = false;
-  int check_slot = this->delta_prev_slot(this->delta_current_slot);
-  do {
-    // To match, must be close enough to the interval.
-    // TODO: what about when millis() wraps?
-    if (abs(this->delta_samples[check_slot].timestamp - old_stamp) <=
-        DELTA_SAMPLE_TOLERANCE) {
-      // Found it
-      out = this->last_sample - this->delta_samples[check_slot].value;
-#ifdef DEBUG_MORE
-      Serial.print("Found it in slot ");
-      Serial.print(check_slot);
-      Serial.print(" ts: ");
-      Serial.print(this->delta_samples[check_slot].timestamp);
-      Serial.print(" delta: ");
-      Serial.println(out);
-#endif
-      found_slot = true;
-    } else {
-      check_slot = this->delta_prev_slot(check_slot);
-    }
-  } while (check_slot != this->delta_current_slot && !found_slot);
-
-#ifdef DEBUG
-  if (!found_slot) {
-    Serial.println("Couldn't find old enough delta");
-  }
-#endif
-
-  return out;
+  return this->last_sample -
+         this->delta_samples[this->delta_next_slot(this->delta_current_slot)];
 }
 
 int StatsCalc::delta_next_slot(int slot) {
@@ -280,6 +292,7 @@ BBI2C bbi2c;
 #define I2C_SDA_PIN 14
 #define I2C_SCL_PIN 15
 #define I2C_CLOCK_FREQUENCY 200000
+#define I2C_BUFFER_SIZE 9
 
 void i2C_setup() {
 #ifdef DEBUG
@@ -293,7 +306,7 @@ void i2C_setup() {
   status_flash(100);  // allow devices to power up
 }
 
-bool check_i2c_write(uint8_t iAddr, uint8_t *pData, int iLen,
+bool check_i2c_write(uint8_t iAddr, const uint8_t *pData, int iLen,
                      int16_t write_delay) {
   // Assume failure
   bool ret = false;
@@ -301,9 +314,9 @@ bool check_i2c_write(uint8_t iAddr, uint8_t *pData, int iLen,
   // Turn on LED to indicate I2C traffic
   digitalWrite(LED_BUILTIN, 1);
 
-  if (I2CWrite(&bbi2c, iAddr, pData, iLen) != iLen) {
+  if (I2CWrite(&bbi2c, iAddr, (uint8_t *)pData, iLen) != iLen) {
     // Error
-#ifdef DEBUG
+#ifdef DEBUG_MORE
     Serial.print("Failed to write ");
     Serial.print(iLen);
     Serial.print(" bytes to ");
@@ -322,20 +335,20 @@ bool check_i2c_write(uint8_t iAddr, uint8_t *pData, int iLen,
 }
 
 // Shared global buffer
-uint8_t readbuffer[12];
+uint8_t i2c_buffer[I2C_BUFFER_SIZE];
 
-bool check_i2c_response(uint8_t iAddr, uint8_t *pData, int wLen,
+bool check_i2c_response(uint8_t iAddr, const uint8_t *pData, int wLen,
                         int16_t write_delay, int rLen) {
   // Assume failure
   bool ret = false;
 
-  if (check_i2c_write(iAddr, pData, wLen, write_delay)) {
-    if (I2CRead(&bbi2c, iAddr, readbuffer, rLen)) {
+  if (check_i2c_write(iAddr, (uint8_t *)pData, wLen, write_delay)) {
+    if (I2CRead(&bbi2c, iAddr, i2c_buffer, rLen)) {
       // We're good... unless CRC fails
       ret = true;
       // CRC is always done with 2 bytes data, 1 byte CRC
       for (int lp = 2; lp < rLen && ret; lp += 3) {
-        if (crc8(&readbuffer[lp - 2], 2) != readbuffer[lp]) {
+        if (crc8(&i2c_buffer[lp - 2], 2) != i2c_buffer[lp]) {
           ret = false;
 #ifdef DEBUG
           Serial.println("Bad CRC");
@@ -380,36 +393,33 @@ static uint8_t crc8(const uint8_t *data, int len) {
 // After the “sgp30_iaq_init” command, a “sgp30_measure_iaq” command has to be
 // sent in regular intervals of 1s to ensure proper operation of the dynamic
 // baseline compensation algorithm.
-// So this is a constant & cannot be changed.
-#define SGP30_MEASURE_IAQ_PERIOD 1000
+// So while that period is configurable via Modbus register it really
+// shouldn't be changed.
 
 unsigned long sgp30_next_measure_iaq;
 unsigned long sgp30_next_get_iaq_baseline;
 
-// SGP30 sensor can return 'spikey' readings so 2-3 minutes is a good moving
-// average period to smooth them. So let's use 2 minutes.
-
-#define SGP30_MA_SAMPLES int(120000 / SGP30_MEASURE_IAQ_PERIOD)
-
-StatsCalc *sgp30_eco2_stats = new StatsCalc();
-StatsCalc *sgp30_tvoc_stats = new StatsCalc();
-
-uint16_t sgp30_iaq_baseline_eco2;
-uint16_t sgp30_iaq_baseline_tvoc;
-
-// Period to get/save baseline - 12 hours
-#define SGP30_GET_IAQ_BASELINE_PERIOD 43200000
+// Period to get/save baseline - 8 hours
+#define SGP30_GET_IAQ_BASELINE_PERIOD 28800000
 
 #define SGP30_I2C_ADDRESS 0x58
 bool have_sgp30 = false;
 
-uint8_t SGP30_READSERIAL[] = {0x36, 0x82};
+const uint8_t SGP30_READSERIAL[] = {0x36, 0x82};
 #define SGP30_READSERIAL_DELAY 10
 #define SGP30_READSERIAL_RESPLEN 9
-uint8_t SGP30_IAQ_INIT[] = {0x20, 0x03};
-uint8_t SGP30_MEASURE_IAQ[] = {0x20, 0x08};
-uint8_t SGP30_MEASURE_RAW[] = {0x20, 0x50};
+const uint8_t SGP30_IAQ_INIT[] = {0x20, 0x03};
+const uint8_t SGP30_MEASURE_IAQ[] = {0x20, 0x08};
+const uint8_t SGP30_MEASURE_RAW[] = {0x20, 0x50};
 const uint8_t SGP30_GET_IAQ_BASELINE[] = {0x20, 0x15};
+
+StatsCalc *sgp30_eco2_stats = new StatsCalc();
+StatsCalc *sgp30_tvoc_stats = new StatsCalc();
+
+void sgp30_init_stats() {
+  sgp30_eco2_stats->init_moving_average(sgp30_ma_period, sgp30_period);
+  sgp30_tvoc_stats->init_moving_average(sgp30_ma_period, sgp30_period);
+}
 
 void sgp30_setup() {
 #ifdef DEBUG
@@ -423,8 +433,7 @@ void sgp30_setup() {
 #endif
     have_sgp30 = true;
 
-    sgp30_eco2_stats->init_moving_average(SGP30_MA_SAMPLES);
-    sgp30_tvoc_stats->init_moving_average(SGP30_MA_SAMPLES);
+    sgp30_init_stats();
 
     sgp30_serial();
 
@@ -451,7 +460,7 @@ void sgp30_loop() {
   // TODO: set absolute humidity from SHT31 if available.
 
   if (millis() >= sgp30_next_measure_iaq) {
-    sgp30_next_measure_iaq += SGP30_MEASURE_IAQ_PERIOD;
+    sgp30_next_measure_iaq += sgp30_period;
     sgp30_measure_iaq();
   }
   if (millis() >= sgp30_next_get_iaq_baseline) {
@@ -472,18 +481,40 @@ void sgp30_serial() {
     // by an 8-bit CRC checksum. Together the 3 words constitute a unique
     // serial ID with a length of 48 bits.
 
-#ifdef DEBUG
+    uint16_t s1 = decode_uint16_t(&i2c_buffer[0]);
+    uint16_t s2 = decode_uint16_t(&i2c_buffer[3]);
+    uint16_t s3 = decode_uint16_t(&i2c_buffer[6]);
+
+#ifdef DEBUG_MORE
     Serial.print("Read serial: ");
-    for (int lp = 0; lp < 9; lp++) {
-      if (lp > 0) {
-        Serial.print(":");
-      }
-      Serial.print(readbuffer[lp], HEX);
-    }
-    Serial.print("\n");
+    Serial.print(s1, HEX);
+    Serial.print(":");
+    Serial.print(s2, HEX);
+    Serial.print(":");
+    Serial.println(s3, HEX);
 #endif
 
-    // TODO: Copy/store serial if changed...
+    // Check to see if this matches stored serial
+    if (s1 != sgp30_serial_1 || s2 != sgp30_serial_2 || s3 != sgp30_serial_3) {
+#ifdef DEBUG_MORE
+      Serial.println("Storing new serial");
+      sgp30_serial_1 = s1;
+      sgp30_serial_2 = s2;
+      sgp30_serial_3 = s3;
+#endif
+    } else {
+      // Same sensor as last power up so get baseline readings from EEPROM
+      // variables and write to sensor.
+      if (sgp30_iaq_baseline_eco2 != 0 && sgp30_iaq_baseline_tvoc != 0) {
+        sgp30_set_iaq_baseline(sgp30_iaq_baseline_eco2,
+                               sgp30_iaq_baseline_tvoc);
+      }
+#ifdef DEBUG
+      else {
+        Serial.println("IAQ baseline is zero, ignoring");
+      }
+#endif
+    }
   }
 }
 
@@ -492,10 +523,6 @@ void sgp30_serial() {
 // reset.
 
 void sgp30_iaq_init(void) {
-#ifdef DEBUG
-  Serial.println(__func__);
-#endif
-
   check_i2c_write(SGP30_I2C_ADDRESS, SGP30_IAQ_INIT, sizeof(SGP30_IAQ_INIT),
                   10);
 }
@@ -509,8 +536,8 @@ void sgp30_get_iaq_baseline() {
 
   if (check_i2c_response(SGP30_I2C_ADDRESS, SGP30_GET_IAQ_BASELINE,
                          sizeof(SGP30_GET_IAQ_BASELINE), 10, 6)) {
-    sgp30_iaq_baseline_eco2 = decode_uint16_t(&readbuffer[0]);
-    sgp30_iaq_baseline_tvoc = decode_uint16_t(&readbuffer[3]);
+    sgp30_iaq_baseline_eco2 = decode_uint16_t(&i2c_buffer[0]);
+    sgp30_iaq_baseline_tvoc = decode_uint16_t(&i2c_buffer[3]);
 
 #ifdef DEBUG
     Serial.print("Read SGP30 baseline: ");
@@ -523,22 +550,24 @@ void sgp30_get_iaq_baseline() {
 
 void sgp30_set_iaq_baseline(uint16_t baseline_eco2, uint16_t baseline_tvoc) {
 #ifdef DEBUG
-  Serial.println(__func__);
+  Serial.print("Setting IAQ baseline: ");
+  Serial.print(baseline_eco2);
+  Serial.print("\t");
+  Serial.println(baseline_tvoc);
 #endif
 
   // Yes, the eco2/TVOC order is reversed in this set command.
 
-  uint8_t writebuffer[8];
-  writebuffer[0] = 0x20;
-  writebuffer[1] = 0x1e;
-  writebuffer[2] = baseline_tvoc >> 8;
-  writebuffer[3] = baseline_tvoc & 0xFF;
-  writebuffer[4] = crc8(&writebuffer[2], 2);
-  writebuffer[5] = baseline_eco2 >> 8;
-  writebuffer[6] = baseline_eco2 & 0xFF;
-  writebuffer[7] = crc8(&writebuffer[5], 2);
+  i2c_buffer[0] = 0x20;
+  i2c_buffer[1] = 0x1e;
+  i2c_buffer[2] = baseline_tvoc >> 8;
+  i2c_buffer[3] = baseline_tvoc & 0xFF;
+  i2c_buffer[4] = crc8(&i2c_buffer[2], 2);
+  i2c_buffer[5] = baseline_eco2 >> 8;
+  i2c_buffer[6] = baseline_eco2 & 0xFF;
+  i2c_buffer[7] = crc8(&i2c_buffer[5], 2);
 
-  check_i2c_write(SGP30_I2C_ADDRESS, writebuffer, sizeof(writebuffer), 10);
+  check_i2c_write(SGP30_I2C_ADDRESS, i2c_buffer, sizeof(i2c_buffer), 10);
 }
 
 // Read IAQ values and calculate our index
@@ -554,8 +583,8 @@ void sgp30_measure_iaq() {
 
   if (check_i2c_response(SGP30_I2C_ADDRESS, SGP30_MEASURE_IAQ,
                          sizeof(SGP30_MEASURE_IAQ), 12, 6)) {
-    sgp30_eco2_stats->sample(decode_uint16_t(&readbuffer[0]));
-    sgp30_tvoc_stats->sample(decode_uint16_t(&readbuffer[3]));
+    sgp30_eco2_stats->sample(decode_uint16_t(&i2c_buffer[0]));
+    sgp30_tvoc_stats->sample(decode_uint16_t(&i2c_buffer[3]));
 
 #ifdef DEBUG
     Serial.print("Read SGP30:\t");
@@ -565,8 +594,7 @@ void sgp30_measure_iaq() {
     Serial.print("\tMAs:\t");
     Serial.print(sgp30_eco2_stats->current_average());
     Serial.print("\t");
-    Serial.print(sgp30_tvoc_stats->current_average());
-    Serial.print("\n");
+    Serial.println(sgp30_tvoc_stats->current_average());
 #endif
   }
 }
@@ -589,10 +617,10 @@ uint32_t getAbsoluteHumidity(float temperature, float humidity) {
 }
 
 // Calculate our IAQ
-int sgp30_calc_iaq(int eco2, int tvoc) {
+uint16_t sgp30_calc_iaq(uint16_t eco2, uint16_t tvoc) {
   // Calculate both and use the highest one.
-  int iaq_eco2 = LR_CO2->calc(eco2);
-  int iaq_tvoc = LR_TVOC->calc(tvoc);
+  uint16_t iaq_eco2 = LR_CO2->calc(eco2);
+  uint16_t iaq_tvoc = LR_TVOC->calc(tvoc);
 
 #ifdef DEBUG
   Serial.print("IAQ CO2: ");
@@ -620,10 +648,10 @@ uint16_t sgp30_check_raw() {
     sgp30_last_raw = now;
     if (check_i2c_response(SGP30_I2C_ADDRESS, SGP30_MEASURE_RAW,
                            sizeof(SGP30_MEASURE_RAW), 25, 6)) {
-      sgp30_raw_h2 = decode_uint16_t(&readbuffer[0]);
-      sgp30_raw_ethanol = decode_uint16_t(&readbuffer[3]);
+      sgp30_raw_h2 = decode_uint16_t(&i2c_buffer[0]);
+      sgp30_raw_ethanol = decode_uint16_t(&i2c_buffer[3]);
 
-#ifdef DEBUG
+#ifdef DEBUG_MORE
       Serial.print("Read SGP30 raw\t");
       Serial.print(sgp30_raw_h2);
       Serial.print("\t");
@@ -641,15 +669,17 @@ uint16_t sgp30_check_raw() {
 bool have_sht31 = false;
 
 unsigned long sht31_nextRead;
-#define sht31_period 1000         // TODO: should come from register.
-#define sht31_delta_period 30000  // TODO: should come from register.
-
-// 30 second moving average for temperature/humidity. TODO: should come from
-// register.
-#define SHT31_MA_SAMPLES int(30000 / sht31_period)
 
 StatsCalc *sht31_temperature_stats = new StatsCalc();
 StatsCalc *sht31_humidity_stats = new StatsCalc();
+
+void sht31_init_stats() {
+  sht31_temperature_stats->init_moving_average(sht31_ma_period, sht31_period);
+  sht31_humidity_stats->init_moving_average(sht31_ma_period, sht31_period);
+
+  sht31_temperature_stats->init_delta(sht31_delta_period, sht31_period);
+  sht31_humidity_stats->init_delta(sht31_delta_period, sht31_period);
+}
 
 void sht31_setup() {
 #ifdef DEBUG
@@ -663,14 +693,7 @@ void sht31_setup() {
 #endif
     have_sht31 = true;
 
-    // Setup stats calculations
-    sht31_temperature_stats->init_moving_average(SHT31_MA_SAMPLES);
-    sht31_humidity_stats->init_moving_average(SHT31_MA_SAMPLES);
-
-    sht31_temperature_stats->init_delta(
-        sht31_delta_period, int(sht31_delta_period / sht31_period) + 1);
-    sht31_humidity_stats->init_delta(
-        sht31_delta_period, int(sht31_delta_period / sht31_period) + 1);
+    sht31_init_stats();
 
     // Read SHT31 right away
     sht31_nextRead = millis();
@@ -691,33 +714,28 @@ void sht31_loop() {
 
 // Stolen from Adafruit SHT31 code
 
-uint8_t SHT31_MEAS_HIGHREP[] = {0x24, 0x00};
-uint8_t SHT31_READSTATUS[] = {0xF3, 0x2D};
-uint8_t SHT31_HEATEREN[] = {0x30, 0x6D};  /* Heater Enable */
-uint8_t SHT31_HEATERDIS[] = {0x30, 0x66}; /* Heater Disable */
-#define SHT31_REG_MSB_HEATER_BITMASK 0x20 /* Status Register Heater Bit */
+const uint8_t SHT31_MEAS_HIGHREP[] = {0x24, 0x00};
+const uint8_t SHT31_READSTATUS[] = {0xF3, 0x2D};
+const uint8_t SHT31_HEATEREN[] = {0x30, 0x6D};  /* Heater Enable */
+const uint8_t SHT31_HEATERDIS[] = {0x30, 0x66}; /* Heater Disable */
+#define SHT31_REG_MSB_HEATER_BITMASK 0x20       /* Status Register Heater Bit */
 
 bool sht31_isHeaterEnabled() {
   if (check_i2c_response(SHT31_I2C_ADDRESS, SHT31_READSTATUS,
                          sizeof(SHT31_READSTATUS), 20, 3)) {
 #ifdef DEBUG_MORE
     Serial.print("Read status: ");
-    Serial.print(readbuffer[0], HEX);
+    Serial.print(i2c_buffer[0], HEX);
     Serial.print("/");
-    Serial.println(readbuffer[1], HEX);
+    Serial.println(i2c_buffer[1], HEX);
 #endif
-    return (readbuffer[0] & SHT31_REG_MSB_HEATER_BITMASK);
+    return (i2c_buffer[0] & SHT31_REG_MSB_HEATER_BITMASK);
   }
 }
 
 void sht31_Heater(bool heater_on) {
-  if (heater_on) {
-    check_i2c_write(SHT31_I2C_ADDRESS, SHT31_HEATEREN, sizeof(SHT31_HEATEREN),
-                    10);
-  } else {
-    check_i2c_write(SHT31_I2C_ADDRESS, SHT31_HEATERDIS, sizeof(SHT31_HEATERDIS),
-                    10);
-  }
+  check_i2c_write(SHT31_I2C_ADDRESS,
+                  heater_on ? SHT31_HEATEREN : SHT31_HEATERDIS, 2, 10);
 }
 
 void sht31_read() {
@@ -735,12 +753,12 @@ void sht31_read() {
     if (check_i2c_response(SHT31_I2C_ADDRESS, SHT31_MEAS_HIGHREP,
                            sizeof(SHT31_MEAS_HIGHREP), 20, 6)) {
       // Calculations take from Adafruit library
-      int32_t stemp = (int32_t)(((uint32_t)readbuffer[0] << 8) | readbuffer[1]);
+      int32_t stemp = (int32_t)(((uint32_t)i2c_buffer[0] << 8) | i2c_buffer[1]);
       // simplified (65536 instead of 65535) integer version of:
       // temp = (stemp * 175.0f) / 65535.0f - 45.0f;
       stemp = ((4375 * stemp) >> 14) - 4500;
 
-      uint32_t shum = ((uint32_t)readbuffer[3] << 8) | readbuffer[4];
+      uint32_t shum = ((uint32_t)i2c_buffer[3] << 8) | i2c_buffer[4];
       // simplified (65536 instead of 65535) integer version of:
       // humidity = (shum * 100.0f) / 65535.0f;
       shum = (625 * shum) >> 12;
@@ -784,33 +802,156 @@ void sht31_read() {
 
 #define modbusRxPin 16
 #define modbusTxPin 17
-#define modbusId 1                // TODO: should be register
-const unsigned long baud = 9600;  // TODO: should be register
-#define MODBUS_INPUT_REGISTERS 28
-const word bufSize = 128;
+#define MODBUS_HOLDING_REGISTER_COUNT 13
+#define MODBUS_INPUT_REGISTER_COUNT 14
 
 // This is the buffer for the ModbusRTUSlave object.
 // It is used to store the Modbus messages.
 // A size of 256 bytes is recommended, but sizes as low as 8 bytes can be
 // used.
-byte buf[bufSize];
+#define MODBUS_BUFFER_SIZE 64
+byte buf[MODBUS_BUFFER_SIZE];
 
 // Initilize a SoftwareSerial port.
 SoftwareSerial mySerial(modbusRxPin, modbusTxPin);
 
 // Initilize a ModbusRTUSlave.
-ModbusRTUSlave modbus(mySerial, buf, bufSize);
+ModbusRTUSlave modbus(mySerial, buf, MODBUS_BUFFER_SIZE);
+
+bool modbus_restart;
 
 void modbus_setup() {
+#ifdef DEBUG
+  Serial.print(__func__);
+  Serial.print("\t");
+  Serial.print("id: ");
+  Serial.print(modbus_id);
+  Serial.print("\t");
+  Serial.print("baud: ");
+  Serial.print(modbus_baud_rate);
+  Serial.print("\n");
+#endif
+  // Reset restart
+  modbus_restart = false;
+
   // Setup the SoftwareSerial port.
-  mySerial.begin(baud);
+  mySerial.begin(modbus_baud_rate);
 
   // Setup the ModbusRTUSlave
-  modbus.begin(modbusId, baud);
+  modbus.begin(modbus_id, modbus_baud_rate);
 
-  // Configure the inputRegister(s).
-  modbus.configureInputRegisters(MODBUS_INPUT_REGISTERS,
+  // Configure the input registers...
+  modbus.configureInputRegisters(MODBUS_INPUT_REGISTER_COUNT,
                                  (ModbusRTUSlave::WordRead)inputRegisterRead);
+
+  // ... and holding registers.
+  modbus.configureHoldingRegisters(
+      MODBUS_HOLDING_REGISTER_COUNT,
+      (ModbusRTUSlave::WordRead)holdingRegisterRead,
+      (ModbusRTUSlave::WordWrite)holdingRegisterWrite);
+}
+
+// Read/write holding registers
+long holdingRegisterRead(word address) {
+  switch (address) {
+    case 0:
+      return SOFTWARE_VERSION;
+    case 1:
+      return modbus_id;
+    case 2:
+      return modbus_baud_rate;
+    case 3:
+      return sht31_period;
+    case 4:
+      return sht31_ma_period;
+    case 5:
+      return sht31_delta_period;
+    case 6:
+      return sgp30_period;
+    case 7:
+      return sgp30_ma_period;
+    case 8:
+      return sgp30_serial_1;
+    case 9:
+      return sgp30_serial_2;
+    case 10:
+      return sgp30_serial_3;
+    case 11:
+      return sgp30_iaq_baseline_eco2;
+    case 12:
+      return sgp30_iaq_baseline_tvoc;
+  }
+  // Should never get here as all registers catered for above.
+  return NAN;
+}
+
+boolean holdingRegisterWrite(word address, word value) {
+  switch (address) {
+    case 1:
+      if (modbus_id != value) {
+        modbus_id = value;
+#ifdef DEBUG
+        Serial.print("New Modbus address: ");
+        Serial.println(modbus_id);
+#endif
+        modbus_restart = true;
+      }
+      return true;
+    case 2:
+      // Sanity check baud rate
+      switch (value) {
+        case 2400:
+        case 4800:
+        case 9600:
+        case 19200:
+        case 38400:
+        case 57600:
+          // Looks good - save it if necessary and restart Modbus
+          if (modbus_baud_rate != value) {
+            modbus_baud_rate = value;
+#ifdef DEBUG
+            Serial.print("New Modbus baud rate: ");
+            Serial.println(modbus_baud_rate);
+#endif
+            modbus_restart = true;
+          }
+          return true;
+      }
+      // Sanity check must have failed
+      return false;
+    case 3:
+      if (sht31_period != value) {
+        sht31_period = value;
+        sht31_init_stats();
+      }
+      return true;
+    case 4:
+      if (sht31_ma_period != value) {
+        sht31_ma_period = value;
+        sht31_init_stats();
+      }
+      return true;
+    case 5:
+      if (sht31_delta_period != value) {
+        sht31_delta_period = value;
+        sht31_init_stats();
+      }
+      return true;
+    case 6:
+      if (sgp30_period != value) {
+        sgp30_period = value;
+        sgp30_init_stats();
+      }
+      return true;
+    case 7:
+      if (sgp30_ma_period != value) {
+        sgp30_ma_period = value;
+        sgp30_init_stats();
+      }
+      return true;
+  }
+  // Can't write this
+  return false;
 }
 
 // This is a function that will be passed to the ModbusRTUSlave for reading
@@ -821,44 +962,40 @@ long inputRegisterRead(word address) {
   Serial.println(address);
 #endif
 
-  // TODO: Clean up?
   switch (address) {
-    case 10:
+    case 0:
       return (uint16_t)sht31_temperature_stats->current_sample();
-    case 11:
+    case 1:
       return sht31_humidity_stats->current_sample();
-    case 12:
+    case 2:
       return (uint16_t)sht31_temperature_stats->current_average();
-    case 13:
+    case 3:
       return sht31_humidity_stats->current_average();
-    case 14:
+    case 4:
       return (uint16_t)sht31_temperature_stats->current_delta();
-    case 15:
+    case 5:
       return (uint16_t)sht31_humidity_stats->current_delta();
-    case 20:
+    case 6:
       sgp30_check_raw();
       return sgp30_raw_h2;
-    case 21:
+    case 7:
       sgp30_check_raw();
       return sgp30_raw_ethanol;
-    case 22:
+    case 8:
       return sgp30_eco2_stats->current_sample();
-    case 23:
+    case 9:
       return sgp30_tvoc_stats->current_sample();
-    case 24:
+    case 10:
       return sgp30_calc_iaq(sgp30_eco2_stats->current_sample(),
                             sgp30_tvoc_stats->current_sample());
-    case 25:
+    case 11:
       return sgp30_eco2_stats->current_average();
-    case 26:
+    case 12:
       return sgp30_tvoc_stats->current_average();
-    case 27:
+    case 13:
       return sgp30_calc_iaq(sgp30_eco2_stats->current_average(),
                             sgp30_tvoc_stats->current_average());
   }
-#ifdef DEBUG_MORE
-  Serial.println("Nothing!");
-#endif
   return NAN;
 }
 
@@ -882,6 +1019,14 @@ void setup() {
 // Main loop
 
 void loop() {
+  // Restart Modbus interface if necessary (after parameter change).
+  if (modbus_restart) {
+#ifdef DEBUG
+    Serial.println("Modbus restart...");
+#endif
+    modbus_setup();
+  }
+
   // Poll for Modbus RTU requests from the master device which will
   // automatically run the inputRegisterRead function as needed.
   //
