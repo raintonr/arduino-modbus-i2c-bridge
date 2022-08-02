@@ -242,7 +242,9 @@ statType StatsCalc<statType>::current_average() {
 
 // Return last value sampled
 template <class statType>
-statType StatsCalc<statType>::current_sample() { return this->last_sample; }
+statType StatsCalc<statType>::current_sample() {
+  return this->last_sample;
+}
 
 // Delta stuff
 // The oldest slot *should* store the delta we're looking for so just use that
@@ -322,7 +324,7 @@ bool check_i2c_write(uint8_t iAddr, const uint8_t *pData, int iLen,
 
   if (I2CWrite(&bbi2c, iAddr, (uint8_t *)pData, iLen) != iLen) {
     // Error
-#ifdef DEBUG_MORE
+#ifdef DEBUG
     Serial.print("Failed to write ");
     Serial.print(iLen);
     Serial.print(" bytes to ");
@@ -463,8 +465,6 @@ void sgp30_setup() {
 void sgp30_loop() {
   if (!have_sgp30) return;
 
-  // TODO: set absolute humidity from SHT31 if available.
-
   if (millis() >= sgp30_next_measure_iaq) {
     sgp30_next_measure_iaq += sgp30_period;
     sgp30_measure_iaq();
@@ -573,7 +573,7 @@ void sgp30_set_iaq_baseline(uint16_t baseline_eco2, uint16_t baseline_tvoc) {
   i2c_buffer[6] = baseline_eco2 & 0xFF;
   i2c_buffer[7] = crc8(&i2c_buffer[5], 2);
 
-  check_i2c_write(SGP30_I2C_ADDRESS, i2c_buffer, sizeof(i2c_buffer), 10);
+  check_i2c_write(SGP30_I2C_ADDRESS, i2c_buffer, 8, 10);
 }
 
 // Read IAQ values and calculate our index
@@ -583,9 +583,8 @@ void sgp30_measure_iaq() {
   Serial.println(__func__);
 #endif
 
-  // It is recommended (well, possible) to send sgp30_set_absolute_humidity
-  // command before each reading, but this requires *absolute* humidity and
-  // the SHT31 used here cannot supply that.
+  // It is recommended  to send sgp30_set_absolute_humidity command before each
+  // reading. We take care of that by setting after each SHT31 measurement.
 
   if (check_i2c_response(SGP30_I2C_ADDRESS, SGP30_MEASURE_IAQ,
                          sizeof(SGP30_MEASURE_IAQ), 12, 6)) {
@@ -605,21 +604,59 @@ void sgp30_measure_iaq() {
   }
 }
 
-// Shamelessly copied from Adafruit examples... ahem... ;)
-// return absolute humidity [mg/m^3] with approximation formula
-// @param temperature [°C]
-// @param humidity [%RH]
+// Set SGP30 humidity compensation
+void sgp30_set_absolute_humidity(float temperature, float humidity) {
+  // Don't bother if we don't have the sensor
+  if (!have_sgp30) return;
 
-uint32_t getAbsoluteHumidity(float temperature, float humidity) {
-  // approximation formula from Sensirion SGP30 Driver Integration
+  // The inputs are scaled * 100 so fix that...
+  temperature /= 100;
+  humidity /= 100;
+
+  // Shamelessly copied from Adafruit examples... ahem... ;)
+  // Calculate absolute humidity [mg/m^3] with approximation formula.
+  //
+  // Approximation formula from Sensirion SGP30 Driver Integration
   // chapter 3.15
-  const float absoluteHumidity =
+
+  float absolute_humidity =
       216.7f * ((humidity / 100.0f) * 6.112f *
                 exp((17.62f * temperature) / (243.12f + temperature)) /
                 (273.15f + temperature));  // [g/m^3]
-  const uint32_t absoluteHumidityScaled =
-      static_cast<uint32_t>(1000.0f * absoluteHumidity);  // [mg/m^3]
-  return absoluteHumidityScaled;
+  absolute_humidity *= 1000.0f;            // [mg/m^3]
+
+  // Can't set value if too large
+  if (absolute_humidity > 256000.0f) {
+#ifdef DEBUG
+    Serial.print("sgp30_set_absolute_humidity absolute too large: ");
+    Serial.println(absolute_humidity);
+#endif
+    status_flash(1000);
+  } else {
+    uint16_t ah_scaled =
+        (uint16_t)(((uint64_t)absolute_humidity * 256 * 16777) >> 24);
+
+    i2c_buffer[0] = 0x20;
+    i2c_buffer[1] = 0x61;
+    i2c_buffer[2] = ah_scaled >> 8;
+    i2c_buffer[3] = ah_scaled & 0xFF;
+    i2c_buffer[4] = crc8(i2c_buffer + 2, 2);
+
+#ifdef DEBUG
+    Serial.print("Setting sgp30 absolute humidity: ");
+    Serial.print(temperature);
+    Serial.print("\t");
+    Serial.print(humidity);
+    Serial.print("\t");
+    Serial.print(absolute_humidity);
+    Serial.print("\t");
+    Serial.print(i2c_buffer[2]);
+    Serial.print("\t");
+    Serial.println(i2c_buffer[3]);
+#endif
+
+    check_i2c_write(SGP30_I2C_ADDRESS, i2c_buffer, 5, 10);
+  }
 }
 
 // Calculate our IAQ
@@ -793,6 +830,9 @@ void sht31_read() {
       Serial.print(dhum);
       Serial.print("\n");
 #endif
+      // Set SGP30 (does nothing if no sensor present)
+      sgp30_set_absolute_humidity(sht31_temperature_stats->current_average(),
+                                  sht31_humidity_stats->current_average());
     }
   }
 }
