@@ -85,17 +85,19 @@ uint16_t LogarithmicRegressionCalculator::calc(uint16_t x) {
 // This is all done in integer (long) arithmetic so no rounding errors (we
 // hope!).
 
+template <class statType>
 class StatsCalc {
  public:
   void init_moving_average(uint16_t ma_period, uint16_t sample_period);
   void init_delta(uint16_t delta_period, uint16_t sample_period);
-  void sample(long input);
-  int current_sample();
-  int current_average();
-  int current_delta();
+  void sample(statType input);
+  statType current_sample();
+  statType current_average();
+  // Delta is always signed
+  int16_t current_delta();
 
  private:
-  long last_sample;
+  statType last_sample;
 
   // Moving Average Stuff
   // Num readings are unsigned 16 bit because they come from Modbus registers.
@@ -110,15 +112,16 @@ class StatsCalc {
   uint16_t delta_period = 0;
   uint16_t delta_num_samples = 0;
 
-  long *delta_samples;
+  statType *delta_samples;
   int delta_current_slot;
   int delta_next_slot(int slot);
   int delta_prev_slot(int slot);
   bool delta_init = false;
 };
 
-void StatsCalc::init_moving_average(uint16_t ma_period,
-                                    uint16_t sample_period) {
+template <typename statType>
+void StatsCalc<statType>::init_moving_average(uint16_t ma_period,
+                                              uint16_t sample_period) {
 #ifdef DEBUG
   Serial.print("init_moving_average: ");
   Serial.print(ma_period);
@@ -138,7 +141,7 @@ void StatsCalc::init_moving_average(uint16_t ma_period,
 
   if (this->ma_init && ma_num_readings != this->ma_num_readings) {
 #ifdef DEBUG
-    Serial.print("Re-initialising ma...");
+    Serial.println("Re-initialising ma...");
 #endif
     this->ma_init = false;
   }
@@ -146,8 +149,10 @@ void StatsCalc::init_moving_average(uint16_t ma_period,
   this->ma_num_readings = ma_num_readings;
 }
 
-void StatsCalc::init_delta(uint16_t delta_period, uint16_t sample_period) {
-#ifdef DEBUG_MORE
+template <class statType>
+void StatsCalc<statType>::init_delta(uint16_t delta_period,
+                                     uint16_t sample_period) {
+#ifdef DEBUG
   Serial.print("init_delta: ");
   Serial.print(delta_period);
   Serial.print("\t");
@@ -160,14 +165,14 @@ void StatsCalc::init_delta(uint16_t delta_period, uint16_t sample_period) {
   // Always round up
   delta_num_samples++;
 
-#ifdef DEBUG_MORE
+#ifdef DEBUG
   Serial.println(delta_num_samples);
 #endif
 
   if (this->delta_init && (delta_period != this->delta_period ||
                            delta_num_samples != this->delta_num_samples)) {
 #ifdef DEBUG
-    Serial.print("Re-initialising delta...");
+    Serial.println("Re-initialising delta...");
 #endif
     free(this->delta_samples);
     this->delta_init = false;
@@ -176,7 +181,8 @@ void StatsCalc::init_delta(uint16_t delta_period, uint16_t sample_period) {
   this->delta_num_samples = delta_num_samples;
 }
 
-void StatsCalc::sample(long input) {
+template <class statType>
+void StatsCalc<statType>::sample(statType input) {
   if (this->ma_num_readings > 0) {
     // Calculate moving average
     if (!ma_init) {
@@ -196,19 +202,14 @@ void StatsCalc::sample(long input) {
   }
 
   if (this->delta_num_samples > 0) {
-    // Stash for delta calculation
-    unsigned long lsecs = millis() / 1000;
-    lsecs &= 0xFFFF;
-    uint16_t now = lsecs;
-
     if (!this->delta_init) {
 #ifdef DEBUG
       Serial.println("delta_init");
 #endif
       this->delta_init = true;
       // Just fill all slots with current data
-      int sample_buffer_size = this->delta_num_samples * sizeof(long);
-      this->delta_samples = (long *)malloc(sample_buffer_size);
+      int sample_buffer_size = this->delta_num_samples * sizeof(statType);
+      this->delta_samples = (statType *)malloc(sample_buffer_size);
       if (this->delta_samples == NULL) {
         // Fatal error!
 #ifdef DEBUG
@@ -234,26 +235,31 @@ void StatsCalc::sample(long input) {
 }
 
 // Return current moving average
-int StatsCalc::current_average() {
+template <class statType>
+statType StatsCalc<statType>::current_average() {
   return this->ma_total / this->ma_num_readings;
 }
 
 // Return last value sampled
-int StatsCalc::current_sample() { return this->last_sample; }
+template <class statType>
+statType StatsCalc<statType>::current_sample() { return this->last_sample; }
 
 // Delta stuff
 // The oldest slot *should* store the delta we're looking for so just use that
 // for calculation.
 
-int StatsCalc::current_delta() {
+template <class statType>
+int16_t StatsCalc<statType>::current_delta() {
   return this->last_sample -
          this->delta_samples[this->delta_next_slot(this->delta_current_slot)];
 }
 
-int StatsCalc::delta_next_slot(int slot) {
+template <class statType>
+int StatsCalc<statType>::delta_next_slot(int slot) {
   return (++slot) % this->delta_num_samples;
 }
-int StatsCalc::delta_prev_slot(int slot) {
+template <class statType>
+int StatsCalc<statType>::delta_prev_slot(int slot) {
   return (slot > 0) ? (slot - 1) : (this->delta_num_samples - 1);
 }
 
@@ -413,8 +419,8 @@ const uint8_t SGP30_MEASURE_IAQ[] = {0x20, 0x08};
 const uint8_t SGP30_MEASURE_RAW[] = {0x20, 0x50};
 const uint8_t SGP30_GET_IAQ_BASELINE[] = {0x20, 0x15};
 
-StatsCalc *sgp30_eco2_stats = new StatsCalc();
-StatsCalc *sgp30_tvoc_stats = new StatsCalc();
+StatsCalc<uint16_t> *sgp30_eco2_stats = new StatsCalc<uint16_t>();
+StatsCalc<uint16_t> *sgp30_tvoc_stats = new StatsCalc<uint16_t>();
 
 void sgp30_init_stats() {
   sgp30_eco2_stats->init_moving_average(sgp30_ma_period, sgp30_period);
@@ -670,8 +676,8 @@ bool have_sht31 = false;
 
 unsigned long sht31_nextRead;
 
-StatsCalc *sht31_temperature_stats = new StatsCalc();
-StatsCalc *sht31_humidity_stats = new StatsCalc();
+StatsCalc<int16_t> *sht31_temperature_stats = new StatsCalc<int16_t>();
+StatsCalc<uint16_t> *sht31_humidity_stats = new StatsCalc<uint16_t>();
 
 void sht31_init_stats() {
   sht31_temperature_stats->init_moving_average(sht31_ma_period, sht31_period);
