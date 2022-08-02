@@ -331,7 +331,18 @@ bool check_i2c_response(uint8_t iAddr, uint8_t *pData, int wLen,
 
   if (check_i2c_write(iAddr, pData, wLen, write_delay)) {
     if (I2CRead(&bbi2c, iAddr, readbuffer, rLen)) {
+      // We're good... unless CRC fails
       ret = true;
+      // CRC is always done with 2 bytes data, 1 byte CRC
+      for (int lp = 2; lp < rLen && ret; lp += 3) {
+        if (crc8(&readbuffer[lp - 2], 2) != readbuffer[lp]) {
+          ret = false;
+#ifdef DEBUG
+          Serial.println("Bad CRC");
+#endif
+          status_flash(500);
+        }
+      }
     }
   }
 
@@ -392,12 +403,12 @@ uint16_t sgp30_iaq_baseline_tvoc;
 #define SGP30_I2C_ADDRESS 0x58
 bool have_sgp30 = false;
 
-const uint8_t SGP30_READSERIAL[] = {0x36, 0x82};
+uint8_t SGP30_READSERIAL[] = {0x36, 0x82};
 #define SGP30_READSERIAL_DELAY 10
 #define SGP30_READSERIAL_RESPLEN 9
-const uint8_t SGP30_IAQ_INIT[] = {0x20, 0x03};
-const uint8_t SGP30_MEASURE_IAQ[] = {0x20, 0x08};
-const uint8_t SGP30_MEASURE_RAW[] = {0x20, 0x50};
+uint8_t SGP30_IAQ_INIT[] = {0x20, 0x03};
+uint8_t SGP30_MEASURE_IAQ[] = {0x20, 0x08};
+uint8_t SGP30_MEASURE_RAW[] = {0x20, 0x50};
 const uint8_t SGP30_GET_IAQ_BASELINE[] = {0x20, 0x15};
 
 void sgp30_setup() {
@@ -472,17 +483,7 @@ void sgp30_serial() {
     Serial.print("\n");
 #endif
 
-    // Check CRCs...
-    if (crc8(&readbuffer[0], 2) != readbuffer[2] ||
-        crc8(&readbuffer[3], 2) != readbuffer[5] ||
-        crc8(&readbuffer[6], 2) != readbuffer[8]) {
-#ifdef DEBUG
-      Serial.println("Bad CRC");
-#endif
-      status_flash(500);
-    } else {
-      // Copy/store serial if changed...
-    }
+    // TODO: Copy/store serial if changed...
   }
 }
 
@@ -508,24 +509,8 @@ void sgp30_get_iaq_baseline() {
 
   if (check_i2c_response(SGP30_I2C_ADDRESS, SGP30_GET_IAQ_BASELINE,
                          sizeof(SGP30_GET_IAQ_BASELINE), 10, 6)) {
-    // Check CRCs...
-    if (crc8(&readbuffer[0], 2) != readbuffer[2]) {
-#ifdef DEBUG
-      Serial.println("Bad eCO2 baseline CRC");
-#endif
-      status_flash(1000);
-    } else {
-      sgp30_iaq_baseline_eco2 = decode_uint16_t(&readbuffer[0]);
-    }
-
-    if (crc8(&readbuffer[3], 2) != readbuffer[5]) {
-#ifdef DEBUG
-      Serial.println("Bad TVOC baseline CRC");
-#endif
-      status_flash(1000);
-    } else {
-      sgp30_iaq_baseline_tvoc = decode_uint16_t(&readbuffer[3]);
-    }
+    sgp30_iaq_baseline_eco2 = decode_uint16_t(&readbuffer[0]);
+    sgp30_iaq_baseline_tvoc = decode_uint16_t(&readbuffer[3]);
 
 #ifdef DEBUG
     Serial.print("Read SGP30 baseline: ");
@@ -569,24 +554,8 @@ void sgp30_measure_iaq() {
 
   if (check_i2c_response(SGP30_I2C_ADDRESS, SGP30_MEASURE_IAQ,
                          sizeof(SGP30_MEASURE_IAQ), 12, 6)) {
-    // Check CRCs...
-    if (crc8(&readbuffer[0], 2) != readbuffer[2]) {
-#ifdef DEBUG
-      Serial.println("Bad eCO2 CRC");
-#endif
-      status_flash(1000);
-    } else {
-      sgp30_eco2_stats->sample(decode_uint16_t(&readbuffer[0]));
-    }
-
-    if (crc8(&readbuffer[3], 2) != readbuffer[5]) {
-#ifdef DEBUG
-      Serial.println("Bad TVOC CRC");
-#endif
-      status_flash(1000);
-    } else {
-      sgp30_tvoc_stats->sample(decode_uint16_t(&readbuffer[3]));
-    }
+    sgp30_eco2_stats->sample(decode_uint16_t(&readbuffer[0]));
+    sgp30_tvoc_stats->sample(decode_uint16_t(&readbuffer[3]));
 
 #ifdef DEBUG
     Serial.print("Read SGP30:\t");
@@ -651,24 +620,8 @@ uint16_t sgp30_check_raw() {
     sgp30_last_raw = now;
     if (check_i2c_response(SGP30_I2C_ADDRESS, SGP30_MEASURE_RAW,
                            sizeof(SGP30_MEASURE_RAW), 25, 6)) {
-      // Check CRCs...
-      if (crc8(&readbuffer[0], 2) != readbuffer[2]) {
-#ifdef DEBUG
-        Serial.println("Bad h2 CRC");
-#endif
-        status_flash(1000);
-      } else {
-        sgp30_raw_h2 = decode_uint16_t(&readbuffer[0]);
-      }
-
-      if (crc8(&readbuffer[3], 2) != readbuffer[5]) {
-#ifdef DEBUG
-        Serial.println("Bad ethanol CRC");
-#endif
-        status_flash(1000);
-      } else {
-        sgp30_raw_ethanol = decode_uint16_t(&readbuffer[3]);
-      }
+      sgp30_raw_h2 = decode_uint16_t(&readbuffer[0]);
+      sgp30_raw_ethanol = decode_uint16_t(&readbuffer[3]);
 
 #ifdef DEBUG
       Serial.print("Read SGP30 raw\t");
@@ -753,15 +706,7 @@ bool sht31_isHeaterEnabled() {
     Serial.print("/");
     Serial.println(readbuffer[1], HEX);
 #endif
-    if (readbuffer[2] != crc8(readbuffer, 2)) {
-#ifdef DEBUG
-      Serial.println("Bad CRC");
-#endif
-      status_flash(500);
-      return 0;
-    } else {
-      return (readbuffer[0] & SHT31_REG_MSB_HEATER_BITMASK);
-    }
+    return (readbuffer[0] & SHT31_REG_MSB_HEATER_BITMASK);
   }
 }
 
@@ -789,51 +734,41 @@ void sht31_read() {
     /* Measurement High Repeatability with Clock Stretch Disabled */
     if (check_i2c_response(SHT31_I2C_ADDRESS, SHT31_MEAS_HIGHREP,
                            sizeof(SHT31_MEAS_HIGHREP), 20, 6)) {
-      // Stolen from Adafruit library
-      if (readbuffer[2] != crc8(readbuffer, 2) ||
-          readbuffer[5] != crc8(readbuffer + 3, 2)) {
-#ifdef DEBUG
-        Serial.println("Bad SHT31 CRC");
-#endif
-        status_flash(500);
-      } else {
-        // Calculations take from Adafruit library
-        int32_t stemp =
-            (int32_t)(((uint32_t)readbuffer[0] << 8) | readbuffer[1]);
-        // simplified (65536 instead of 65535) integer version of:
-        // temp = (stemp * 175.0f) / 65535.0f - 45.0f;
-        stemp = ((4375 * stemp) >> 14) - 4500;
+      // Calculations take from Adafruit library
+      int32_t stemp = (int32_t)(((uint32_t)readbuffer[0] << 8) | readbuffer[1]);
+      // simplified (65536 instead of 65535) integer version of:
+      // temp = (stemp * 175.0f) / 65535.0f - 45.0f;
+      stemp = ((4375 * stemp) >> 14) - 4500;
 
-        uint32_t shum = ((uint32_t)readbuffer[3] << 8) | readbuffer[4];
-        // simplified (65536 instead of 65535) integer version of:
-        // humidity = (shum * 100.0f) / 65535.0f;
-        shum = (625 * shum) >> 12;
+      uint32_t shum = ((uint32_t)readbuffer[3] << 8) | readbuffer[4];
+      // simplified (65536 instead of 65535) integer version of:
+      // humidity = (shum * 100.0f) / 65535.0f;
+      shum = (625 * shum) >> 12;
 
-        // Test negative temperatures
-        // stemp -= 5000;
+      // Test negative temperatures
+      // stemp -= 5000;
 
-        // Stash in stats calculator
-        sht31_temperature_stats->sample(stemp);
-        sht31_humidity_stats->sample(shum);
+      // Stash in stats calculator
+      sht31_temperature_stats->sample(stemp);
+      sht31_humidity_stats->sample(shum);
 
 #ifdef DEBUG
-        int dtemp = sht31_temperature_stats->current_delta();
-        int dhum = sht31_humidity_stats->current_delta();
-        Serial.print("Read SHT31:\t");
-        Serial.print(stemp);
-        Serial.print("\t");
-        Serial.print(shum);
-        Serial.print("\tMAs:\t");
-        Serial.print(sht31_temperature_stats->current_average());
-        Serial.print("\t");
-        Serial.print(sht31_humidity_stats->current_average());
-        Serial.print("\tDs:\t");
-        Serial.print(dtemp);
-        Serial.print("\t");
-        Serial.print(dhum);
-        Serial.print("\n");
+      int dtemp = sht31_temperature_stats->current_delta();
+      int dhum = sht31_humidity_stats->current_delta();
+      Serial.print("Read SHT31:\t");
+      Serial.print(stemp);
+      Serial.print("\t");
+      Serial.print(shum);
+      Serial.print("\tMAs:\t");
+      Serial.print(sht31_temperature_stats->current_average());
+      Serial.print("\t");
+      Serial.print(sht31_humidity_stats->current_average());
+      Serial.print("\tDs:\t");
+      Serial.print(dtemp);
+      Serial.print("\t");
+      Serial.print(dhum);
+      Serial.print("\n");
 #endif
-      }
     }
   }
 }
