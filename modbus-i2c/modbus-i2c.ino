@@ -7,6 +7,11 @@
 #define SOFTWARE_VERSION 1
 
 #undef DEBUG
+#undef DEBUG_STATS
+#undef DEBUG_I2C
+#undef DEBUG_SGP30
+#undef DEBUG_SHT31
+#undef DEBUG_MODBUS
 
 //////////////////////////////////////////////////////////////////////////////
 // Stuff we need to store in EEPROM with default values
@@ -125,7 +130,7 @@ class StatsCalc {
 template <typename statType>
 void StatsCalc<statType>::init_moving_average(uint16_t ma_period,
                                               uint16_t sample_period) {
-#ifdef DEBUG
+#ifdef DEBUG_STATS
   Serial.print("init_moving_average: ");
   Serial.print(ma_period);
   Serial.print("\t");
@@ -138,12 +143,12 @@ void StatsCalc<statType>::init_moving_average(uint16_t ma_period,
   // Always round up
   ma_num_readings++;
 
-#ifdef DEBUG
+#ifdef DEBUG_STATS
   Serial.println(ma_num_readings);
 #endif
 
   if (this->ma_init && ma_num_readings != this->ma_num_readings) {
-#ifdef DEBUG
+#ifdef DEBUG_STATS
     Serial.println("Re-initialising ma...");
 #endif
     this->ma_init = false;
@@ -155,7 +160,7 @@ void StatsCalc<statType>::init_moving_average(uint16_t ma_period,
 template <class statType>
 void StatsCalc<statType>::init_delta(uint16_t delta_period,
                                      uint16_t sample_period) {
-#ifdef DEBUG
+#ifdef DEBUG_STATS
   Serial.print("init_delta: ");
   Serial.print(delta_period);
   Serial.print("\t");
@@ -168,13 +173,13 @@ void StatsCalc<statType>::init_delta(uint16_t delta_period,
   // Always round up
   delta_num_samples++;
 
-#ifdef DEBUG
+#ifdef DEBUG_STATS
   Serial.println(delta_num_samples);
 #endif
 
   if (this->delta_init && (delta_period != this->delta_period ||
                            delta_num_samples != this->delta_num_samples)) {
-#ifdef DEBUG
+#ifdef DEBUG_STATS
     Serial.println("Re-initialising delta...");
 #endif
     free(this->delta_samples);
@@ -189,7 +194,7 @@ void StatsCalc<statType>::sample(statType input) {
   if (this->ma_num_readings > 0) {
     // Calculate moving average
     if (!ma_init) {
-#ifdef DEBUG
+#ifdef DEBUG_STATS
       Serial.println("ma_init");
 #endif
       ma_init = true;
@@ -206,7 +211,7 @@ void StatsCalc<statType>::sample(statType input) {
 
   if (this->delta_num_samples > 0) {
     if (!this->delta_init) {
-#ifdef DEBUG
+#ifdef DEBUG_STATS
       Serial.println("delta_init");
 #endif
       this->delta_init = true;
@@ -215,7 +220,7 @@ void StatsCalc<statType>::sample(statType input) {
       this->delta_samples = (statType *)malloc(sample_buffer_size);
       if (this->delta_samples == NULL) {
         // Fatal error!
-#ifdef DEBUG
+#ifdef DEBUG_STATS
         Serial.print("Could not malloc: ");
         Serial.println(sample_buffer_size);
 #endif
@@ -302,7 +307,7 @@ BBI2C bbi2c;
 #define I2C_BUFFER_SIZE 9
 
 void i2C_setup() {
-#ifdef DEBUG
+#ifdef DEBUG_I2C
   Serial.println(__func__);
 #endif
 
@@ -323,7 +328,7 @@ bool check_i2c_write(uint8_t iAddr, const uint8_t *pData, int iLen,
 
   if (I2CWrite(&bbi2c, iAddr, (uint8_t *)pData, iLen) != iLen) {
     // Error
-#ifdef DEBUG
+#ifdef DEBUG_I2C
     Serial.print("Failed to write ");
     Serial.print(iLen);
     Serial.print(" bytes to ");
@@ -357,7 +362,7 @@ bool check_i2c_response(uint8_t iAddr, const uint8_t *pData, int wLen,
       for (int lp = 2; lp < rLen && ret; lp += 3) {
         if (crc8(&i2c_buffer[lp - 2], 2) != i2c_buffer[lp]) {
           ret = false;
-#ifdef DEBUG
+#ifdef DEBUG_I2C
           Serial.println("Bad CRC");
 #endif
           status_flash(500);
@@ -429,13 +434,13 @@ void sgp30_init_stats() {
 }
 
 void sgp30_setup() {
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
   Serial.println(__func__);
 #endif
 
   // Check we have this device
   if (I2CTest(&bbi2c, SGP30_I2C_ADDRESS)) {
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
     Serial.println("Found SGP30");
 #endif
     have_sgp30 = true;
@@ -455,7 +460,7 @@ void sgp30_setup() {
     // But wait one period before getting baseline
     sgp30_next_get_iaq_baseline = millis() + SGP30_GET_IAQ_BASELINE_PERIOD;
   } else {
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
     Serial.println("SGP30 not found");
 #endif
   }
@@ -475,7 +480,7 @@ void sgp30_loop() {
 }
 
 void sgp30_serial() {
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
   Serial.println(__func__);
 #endif
 
@@ -490,7 +495,7 @@ void sgp30_serial() {
     uint16_t s2 = decode_uint16_t(&i2c_buffer[3]);
     uint16_t s3 = decode_uint16_t(&i2c_buffer[6]);
 
-#ifdef DEBUG_MORE
+#ifdef DEBUG_SGP30
     Serial.print("Read serial: ");
     Serial.print(s1, HEX);
     Serial.print(":");
@@ -501,7 +506,7 @@ void sgp30_serial() {
 
     // Check to see if this matches stored serial
     if (s1 != sgp30_serial_1 || s2 != sgp30_serial_2 || s3 != sgp30_serial_3) {
-#ifdef DEBUG_MORE
+#ifdef DEBUG_SGP30
       Serial.println("Storing new serial");
       sgp30_serial_1 = s1;
       sgp30_serial_2 = s2;
@@ -514,7 +519,7 @@ void sgp30_serial() {
         sgp30_set_iaq_baseline(sgp30_iaq_baseline_eco2,
                                sgp30_iaq_baseline_tvoc);
       }
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
       else {
         Serial.println("IAQ baseline is zero, ignoring");
       }
@@ -535,7 +540,7 @@ void sgp30_iaq_init(void) {
 // Get baseline
 
 void sgp30_get_iaq_baseline() {
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
   Serial.println(__func__);
 #endif
 
@@ -544,7 +549,7 @@ void sgp30_get_iaq_baseline() {
     sgp30_iaq_baseline_eco2 = decode_uint16_t(&i2c_buffer[0]);
     sgp30_iaq_baseline_tvoc = decode_uint16_t(&i2c_buffer[3]);
 
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
     Serial.print("Read SGP30 baseline: ");
     Serial.print(sgp30_iaq_baseline_eco2);
     Serial.print("\t");
@@ -554,7 +559,7 @@ void sgp30_get_iaq_baseline() {
 }
 
 void sgp30_set_iaq_baseline(uint16_t baseline_eco2, uint16_t baseline_tvoc) {
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
   Serial.print("Setting IAQ baseline: ");
   Serial.print(baseline_eco2);
   Serial.print("\t");
@@ -578,7 +583,7 @@ void sgp30_set_iaq_baseline(uint16_t baseline_eco2, uint16_t baseline_tvoc) {
 // Read IAQ values and calculate our index
 
 void sgp30_measure_iaq() {
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
   Serial.println(__func__);
 #endif
 
@@ -590,7 +595,7 @@ void sgp30_measure_iaq() {
     sgp30_eco2_stats->sample(decode_uint16_t(&i2c_buffer[0]));
     sgp30_tvoc_stats->sample(decode_uint16_t(&i2c_buffer[3]));
 
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
     Serial.print("Read SGP30:\t");
     Serial.print(sgp30_eco2_stats->current_sample());
     Serial.print("\t");
@@ -626,7 +631,7 @@ void sgp30_set_absolute_humidity(float temperature, float humidity) {
 
   // Can't set value if too large
   if (absolute_humidity > 256000.0f) {
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
     Serial.print("sgp30_set_absolute_humidity absolute too large: ");
     Serial.println(absolute_humidity);
 #endif
@@ -641,7 +646,7 @@ void sgp30_set_absolute_humidity(float temperature, float humidity) {
     i2c_buffer[3] = ah_scaled & 0xFF;
     i2c_buffer[4] = crc8(i2c_buffer + 2, 2);
 
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
     Serial.print("Setting sgp30 absolute humidity: ");
     Serial.print(temperature);
     Serial.print("\t");
@@ -664,7 +669,7 @@ uint16_t sgp30_calc_iaq(uint16_t eco2, uint16_t tvoc) {
   uint16_t iaq_eco2 = LR_CO2->calc(eco2);
   uint16_t iaq_tvoc = LR_TVOC->calc(tvoc);
 
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
   Serial.print("IAQ CO2: ");
   Serial.print(iaq_eco2);
   Serial.print("\tIAQ TVOC: ");
@@ -680,7 +685,7 @@ uint16_t sgp30_raw_h2;
 uint16_t sgp30_raw_ethanol;
 
 uint16_t sgp30_check_raw() {
-#ifdef DEBUG
+#ifdef DEBUG_SGP30
   Serial.println(__func__);
 #endif
   // Make sure raw values are less than 'max age' old...
@@ -693,7 +698,7 @@ uint16_t sgp30_check_raw() {
       sgp30_raw_h2 = decode_uint16_t(&i2c_buffer[0]);
       sgp30_raw_ethanol = decode_uint16_t(&i2c_buffer[3]);
 
-#ifdef DEBUG_MORE
+#ifdef DEBUG_SGP30
       Serial.print("Read SGP30 raw\t");
       Serial.print(sgp30_raw_h2);
       Serial.print("\t");
@@ -724,13 +729,13 @@ void sht31_init_stats() {
 }
 
 void sht31_setup() {
-#ifdef DEBUG
+#ifdef DEBUG_SHT31
   Serial.println(__func__);
 #endif
 
   // Check we have this device
   if (I2CTest(&bbi2c, SHT31_I2C_ADDRESS)) {
-#ifdef DEBUG
+#ifdef DEBUG_SHT31
     Serial.println("Found SHT31");
 #endif
     have_sht31 = true;
@@ -740,7 +745,7 @@ void sht31_setup() {
     // Read SHT31 right away
     sht31_nextRead = millis();
   } else {
-#ifdef DEBUG
+#ifdef DEBUG_SHT31
     Serial.println("SHT31 not found");
 #endif
   }
@@ -765,7 +770,7 @@ const uint8_t SHT31_HEATERDIS[] = {0x30, 0x66}; /* Heater Disable */
 bool sht31_isHeaterEnabled() {
   if (check_i2c_response(SHT31_I2C_ADDRESS, SHT31_READSTATUS,
                          sizeof(SHT31_READSTATUS), 20, 3)) {
-#ifdef DEBUG_MORE
+#ifdef DEBUG_SHT31
     Serial.print("Read status: ");
     Serial.print(i2c_buffer[0], HEX);
     Serial.print("/");
@@ -783,7 +788,7 @@ void sht31_Heater(bool heater_on) {
 void sht31_read() {
   // Make sure heater is always off
   if (sht31_isHeaterEnabled()) {
-#ifdef DEBUG
+#ifdef DEBUG_SHT31
     Serial.println("SHT31 heater is on - turning off");
 #endif
     sht31_Heater(false);
@@ -812,7 +817,7 @@ void sht31_read() {
       sht31_temperature_stats->sample(stemp);
       sht31_humidity_stats->sample(shum);
 
-#ifdef DEBUG
+#ifdef DEBUG_SHT31
       int dtemp = sht31_temperature_stats->current_delta();
       int dhum = sht31_humidity_stats->current_delta();
       Serial.print("Read SHT31:\t");
@@ -866,7 +871,7 @@ ModbusRTUSlave modbus(mySerial, buf, MODBUS_BUFFER_SIZE);
 bool modbus_restart;
 
 void modbus_setup() {
-#ifdef DEBUG
+#ifdef DEBUG_MODBUS
   Serial.print(__func__);
   Serial.print("\t");
   Serial.print("id: ");
@@ -935,7 +940,7 @@ boolean holdingRegisterWrite(word address, word value) {
     case 1:
       if (modbus_id != value) {
         modbus_id = value;
-#ifdef DEBUG
+#ifdef DEBUG_MODBUS
         Serial.print("New Modbus address: ");
         Serial.println(modbus_id);
 #endif
@@ -954,7 +959,7 @@ boolean holdingRegisterWrite(word address, word value) {
           // Looks good - save it if necessary and restart Modbus
           if (modbus_baud_rate != value) {
             modbus_baud_rate = value;
-#ifdef DEBUG
+#ifdef DEBUG_MODBUS
             Serial.print("New Modbus baud rate: ");
             Serial.println(modbus_baud_rate);
 #endif
@@ -1002,7 +1007,7 @@ boolean holdingRegisterWrite(word address, word value) {
 // This is a function that will be passed to the ModbusRTUSlave for reading
 // input registers.
 long inputRegisterRead(word address) {
-#ifdef DEBUG_MORE
+#ifdef DEBUG_MODBUS
   Serial.print("inputRegisterRead : ");
   Serial.println(address);
 #endif
@@ -1051,7 +1056,7 @@ void setup() {
 #ifdef DEBUG
   Serial.begin(115200);
   delay(100);
-  Serial.println("Modbus SHT31 sensor");
+  Serial.println("Modbus environmental sensor");
 #endif
 
   i2C_setup();
@@ -1066,7 +1071,7 @@ void setup() {
 void loop() {
   // Restart Modbus interface if necessary (after parameter change).
   if (modbus_restart) {
-#ifdef DEBUG
+#ifdef DEBUG_MODBUS
     Serial.println("Modbus restart...");
 #endif
     modbus_setup();
