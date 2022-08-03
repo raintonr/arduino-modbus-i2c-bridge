@@ -300,7 +300,9 @@ LogarithmicRegressionCalculator *LR_CO2 =
 
 #include <BitBang_I2C.h>
 BBI2C bbi2c;
+// Pin 14 == A0
 #define I2C_SDA_PIN 14
+// Pin 15 == A1
 #define I2C_SCL_PIN 15
 #define I2C_CLOCK_FREQUENCY 200000
 #define I2C_BUFFER_SIZE 9
@@ -516,6 +518,9 @@ void sgp30_serial() {
       sgp30_serial_2 = s2;
       sgp30_serial_3 = s3;
 #endif
+      sgp30_serial_1 = s1;
+      sgp30_serial_2 = s2;
+      sgp30_serial_3 = s3;
     } else {
       // Same sensor as last power up so get baseline readings from EEPROM
       // variables and write to sensor.
@@ -854,8 +859,11 @@ void sht31_read() {
 #include <ModbusRTUSlave.h>
 #include <SoftwareSerial.h>
 
-#define modbusRxPin 16
-#define modbusTxPin 17
+// Pin 16 == A2
+#define MODBUS_RX_PIN 16
+// Pin 17 == A3
+#define MODBUS_TX_PIN 17
+
 #define MODBUS_HOLDING_REGISTER_COUNT 13
 #define MODBUS_INPUT_REGISTER_COUNT 14
 
@@ -870,7 +878,7 @@ void sht31_read() {
 byte buf[MODBUS_BUFFER_SIZE];
 
 // Initilize a SoftwareSerial port.
-SoftwareSerial mySerial(modbusRxPin, modbusTxPin);
+SoftwareSerial mySerial(MODBUS_RX_PIN, MODBUS_TX_PIN);
 
 // Initilize a ModbusRTUSlave.
 ModbusRTUSlave modbus(mySerial, buf, MODBUS_BUFFER_SIZE);
