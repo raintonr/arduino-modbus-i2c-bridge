@@ -259,8 +259,7 @@ statType StatsCalc<statType>::current_sample() {
 
 template <class statType>
 int16_t StatsCalc<statType>::current_delta() {
-  return this->last_sample -
-         this->delta_samples[this->delta_next_slot()];
+  return this->last_sample - this->delta_samples[this->delta_next_slot()];
 }
 
 template <class statType>
@@ -318,8 +317,8 @@ void i2C_setup() {
   status_flash(100);  // allow devices to power up
 }
 
-bool check_i2c_write(uint8_t iAddr, const uint8_t *pData, int iLen,
-                     int16_t write_delay) {
+bool check_i2c_write(bool *fail_flag, uint8_t iAddr, const uint8_t *pData,
+                     int iLen, int16_t write_delay) {
   // Assume failure
   bool ret = false;
 
@@ -327,7 +326,8 @@ bool check_i2c_write(uint8_t iAddr, const uint8_t *pData, int iLen,
   digitalWrite(LED_BUILTIN, 1);
 
   if (I2CWrite(&bbi2c, iAddr, (uint8_t *)pData, iLen) != iLen) {
-    // Error
+    // Error - set flag so device is unavailable
+    *fail_flag = false;
 #ifdef DEBUG_I2C
     Serial.print("Failed to write ");
     Serial.print(iLen);
@@ -349,19 +349,23 @@ bool check_i2c_write(uint8_t iAddr, const uint8_t *pData, int iLen,
 // Shared global buffer
 uint8_t i2c_buffer[I2C_BUFFER_SIZE];
 
-bool check_i2c_response(uint8_t iAddr, const uint8_t *pData, int wLen,
-                        int16_t write_delay, int rLen) {
+bool check_i2c_response(bool *fail_flag, uint8_t iAddr, const uint8_t *pData,
+                        int wLen, int16_t write_delay, int rLen) {
   // Assume failure
   bool ret = false;
 
-  if (check_i2c_write(iAddr, (uint8_t *)pData, wLen, write_delay)) {
+  if (check_i2c_write(fail_flag, iAddr, (uint8_t *)pData, wLen, write_delay)) {
     if (I2CRead(&bbi2c, iAddr, i2c_buffer, rLen)) {
       // We're good... unless CRC fails
       ret = true;
       // CRC is always done with 2 bytes data, 1 byte CRC
       for (int lp = 2; lp < rLen && ret; lp += 3) {
         if (crc8(&i2c_buffer[lp - 2], 2) != i2c_buffer[lp]) {
+          // Error - set flag so device is unavailable
+          *fail_flag = false;
+
           ret = false;
+
 #ifdef DEBUG_I2C
           Serial.println("Bad CRC");
 #endif
@@ -484,7 +488,7 @@ void sgp30_serial() {
   Serial.println(__func__);
 #endif
 
-  if (check_i2c_response(SGP30_I2C_ADDRESS, SGP30_READSERIAL,
+  if (check_i2c_response(&have_sgp30, SGP30_I2C_ADDRESS, SGP30_READSERIAL,
                          sizeof(SGP30_READSERIAL), SGP30_READSERIAL_DELAY,
                          SGP30_READSERIAL_RESPLEN)) {
     // The get serial ID command returns 3 words, and every word is followed
@@ -533,8 +537,8 @@ void sgp30_serial() {
 // reset.
 
 void sgp30_iaq_init(void) {
-  check_i2c_write(SGP30_I2C_ADDRESS, SGP30_IAQ_INIT, sizeof(SGP30_IAQ_INIT),
-                  10);
+  check_i2c_write(&have_sgp30, SGP30_I2C_ADDRESS, SGP30_IAQ_INIT,
+                  sizeof(SGP30_IAQ_INIT), 10);
 }
 
 // Get baseline
@@ -544,7 +548,7 @@ void sgp30_get_iaq_baseline() {
   Serial.println(__func__);
 #endif
 
-  if (check_i2c_response(SGP30_I2C_ADDRESS, SGP30_GET_IAQ_BASELINE,
+  if (check_i2c_response(&have_sgp30, SGP30_I2C_ADDRESS, SGP30_GET_IAQ_BASELINE,
                          sizeof(SGP30_GET_IAQ_BASELINE), 10, 6)) {
     sgp30_iaq_baseline_eco2 = decode_uint16_t(&i2c_buffer[0]);
     sgp30_iaq_baseline_tvoc = decode_uint16_t(&i2c_buffer[3]);
@@ -577,7 +581,7 @@ void sgp30_set_iaq_baseline(uint16_t baseline_eco2, uint16_t baseline_tvoc) {
   i2c_buffer[6] = baseline_eco2 & 0xFF;
   i2c_buffer[7] = crc8(&i2c_buffer[5], 2);
 
-  check_i2c_write(SGP30_I2C_ADDRESS, i2c_buffer, 8, 10);
+  check_i2c_write(&have_sgp30, SGP30_I2C_ADDRESS, i2c_buffer, 8, 10);
 }
 
 // Read IAQ values and calculate our index
@@ -590,7 +594,7 @@ void sgp30_measure_iaq() {
   // It is recommended  to send sgp30_set_absolute_humidity command before each
   // reading. We take care of that by setting after each SHT31 measurement.
 
-  if (check_i2c_response(SGP30_I2C_ADDRESS, SGP30_MEASURE_IAQ,
+  if (check_i2c_response(&have_sgp30, SGP30_I2C_ADDRESS, SGP30_MEASURE_IAQ,
                          sizeof(SGP30_MEASURE_IAQ), 12, 6)) {
     sgp30_eco2_stats->sample(decode_uint16_t(&i2c_buffer[0]));
     sgp30_tvoc_stats->sample(decode_uint16_t(&i2c_buffer[3]));
@@ -659,7 +663,7 @@ void sgp30_set_absolute_humidity(float temperature, float humidity) {
     Serial.println(i2c_buffer[3]);
 #endif
 
-    check_i2c_write(SGP30_I2C_ADDRESS, i2c_buffer, 5, 10);
+    check_i2c_write(&have_sgp30, SGP30_I2C_ADDRESS, i2c_buffer, 5, 10);
   }
 }
 
@@ -693,7 +697,7 @@ uint16_t sgp30_check_raw() {
   if (now - sgp30_last_raw > SGP30_MAX_RAW_AGE) {
     // ... read them if so
     sgp30_last_raw = now;
-    if (check_i2c_response(SGP30_I2C_ADDRESS, SGP30_MEASURE_RAW,
+    if (check_i2c_response(&have_sgp30, SGP30_I2C_ADDRESS, SGP30_MEASURE_RAW,
                            sizeof(SGP30_MEASURE_RAW), 25, 6)) {
       sgp30_raw_h2 = decode_uint16_t(&i2c_buffer[0]);
       sgp30_raw_ethanol = decode_uint16_t(&i2c_buffer[3]);
@@ -768,7 +772,7 @@ const uint8_t SHT31_HEATERDIS[] = {0x30, 0x66}; /* Heater Disable */
 #define SHT31_REG_MSB_HEATER_BITMASK 0x20       /* Status Register Heater Bit */
 
 bool sht31_isHeaterEnabled() {
-  if (check_i2c_response(SHT31_I2C_ADDRESS, SHT31_READSTATUS,
+  if (check_i2c_response(&have_sht31, SHT31_I2C_ADDRESS, SHT31_READSTATUS,
                          sizeof(SHT31_READSTATUS), 20, 3)) {
 #ifdef DEBUG_SHT31
     Serial.print("Read status: ");
@@ -781,7 +785,7 @@ bool sht31_isHeaterEnabled() {
 }
 
 void sht31_Heater(bool heater_on) {
-  check_i2c_write(SHT31_I2C_ADDRESS,
+  check_i2c_write(&have_sht31, SHT31_I2C_ADDRESS,
                   heater_on ? SHT31_HEATEREN : SHT31_HEATERDIS, 2, 10);
 }
 
@@ -797,7 +801,7 @@ void sht31_read() {
     status_flash(250);
   } else {
     /* Measurement High Repeatability with Clock Stretch Disabled */
-    if (check_i2c_response(SHT31_I2C_ADDRESS, SHT31_MEAS_HIGHREP,
+    if (check_i2c_response(&have_sht31, SHT31_I2C_ADDRESS, SHT31_MEAS_HIGHREP,
                            sizeof(SHT31_MEAS_HIGHREP), 20, 6)) {
       // Calculations take from Adafruit library
       int32_t stemp = (int32_t)(((uint32_t)i2c_buffer[0] << 8) | i2c_buffer[1]);
@@ -854,6 +858,9 @@ void sht31_read() {
 #define modbusTxPin 17
 #define MODBUS_HOLDING_REGISTER_COUNT 13
 #define MODBUS_INPUT_REGISTER_COUNT 14
+
+// What to return when we can't repond to register read
+#define MODBUS_REGISTER_EXCEPTION -1
 
 // This is the buffer for the ModbusRTUSlave object.
 // It is used to store the Modbus messages.
@@ -1013,40 +1020,50 @@ long inputRegisterRead(word address) {
 #endif
 
   switch (address) {
-    case 0:
-      return (uint16_t)sht31_temperature_stats->current_sample();
-    case 1:
-      return sht31_humidity_stats->current_sample();
-    case 2:
-      return (uint16_t)sht31_temperature_stats->current_average();
-    case 3:
-      return sht31_humidity_stats->current_average();
-    case 4:
-      return (uint16_t)sht31_temperature_stats->current_delta();
-    case 5:
-      return (uint16_t)sht31_humidity_stats->current_delta();
-    case 6:
-      sgp30_check_raw();
-      return sgp30_raw_h2;
-    case 7:
-      sgp30_check_raw();
-      return sgp30_raw_ethanol;
-    case 8:
-      return sgp30_eco2_stats->current_sample();
-    case 9:
-      return sgp30_tvoc_stats->current_sample();
-    case 10:
-      return sgp30_calc_iaq(sgp30_eco2_stats->current_sample(),
-                            sgp30_tvoc_stats->current_sample());
-    case 11:
-      return sgp30_eco2_stats->current_average();
-    case 12:
-      return sgp30_tvoc_stats->current_average();
-    case 13:
-      return sgp30_calc_iaq(sgp30_eco2_stats->current_average(),
-                            sgp30_tvoc_stats->current_average());
+    case 0 ... 5:
+      // SHT31 stuff
+      if (!have_sht31) return MODBUS_REGISTER_EXCEPTION;
+      switch (address) {
+        case 0:
+          return (uint16_t)sht31_temperature_stats->current_sample();
+        case 1:
+          return sht31_humidity_stats->current_sample();
+        case 2:
+          return (uint16_t)sht31_temperature_stats->current_average();
+        case 3:
+          return sht31_humidity_stats->current_average();
+        case 4:
+          return (uint16_t)sht31_temperature_stats->current_delta();
+        case 5:
+          return (uint16_t)sht31_humidity_stats->current_delta();
+      }
+    case 6 ... 13:
+      // SGP30 stuff
+      if (!have_sgp30) return MODBUS_REGISTER_EXCEPTION;
+      switch (address) {
+        case 6:
+          sgp30_check_raw();
+          return sgp30_raw_h2;
+        case 7:
+          sgp30_check_raw();
+          return sgp30_raw_ethanol;
+        case 8:
+          return sgp30_eco2_stats->current_sample();
+        case 9:
+          return sgp30_tvoc_stats->current_sample();
+        case 10:
+          return sgp30_calc_iaq(sgp30_eco2_stats->current_sample(),
+                                sgp30_tvoc_stats->current_sample());
+        case 11:
+          return sgp30_eco2_stats->current_average();
+        case 12:
+          return sgp30_tvoc_stats->current_average();
+        case 13:
+          return sgp30_calc_iaq(sgp30_eco2_stats->current_average(),
+                                sgp30_tvoc_stats->current_average());
+      }
   }
-  return NAN;
+  return MODBUS_REGISTER_EXCEPTION;
 }
 
 //////////////////////////////////////////////////////////////////////////////
