@@ -93,6 +93,6 @@ To read all input registers (must have all sensors connected or a Modbus excepti
 
 Some of this shamelessly copied from Adafruit libraries:
 
-https://github.com/adafruit/Adafruit_SHT31
-https://github.com/adafruit/Adafruit_SGP30
+* https://github.com/adafruit/Adafruit_SHT31
+* https://github.com/adafruit/Adafruit_SGP30
 
