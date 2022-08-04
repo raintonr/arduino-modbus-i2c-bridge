@@ -88,3 +88,11 @@ To change Modbus address from 1 to 2:
 To read all input registers (must have all sensors connected or a Modbus exception will be returned):
 
 `modpoll -m rtu -b 9600 -p none -a 1 -0 -1 -t 3 -r 0 -c 14 /dev/ttyUSB0`
+
+## References/Credits
+
+Some of this shamelessly copied from Adafruit libraries:
+
+https://github.com/adafruit/Adafruit_SHT31
+https://github.com/adafruit/Adafruit_SGP30
+
