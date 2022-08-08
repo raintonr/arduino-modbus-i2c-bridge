@@ -85,10 +85,17 @@ To change Modbus address from 1 to 2:
 
 `modpoll -m rtu -b 9600 -p none -a 1 -0 -1 -t 4 -r 1 -c 1 /dev/ttyUSB0 2`
 
+To change SHT31 delta period to 60 seconds:
+
+`modpoll -m rtu -b 9600 -p none -a 1 -0 -1 -t 4 -r 5 -c 1 /dev/ttyUSB0 60`
+
 To read all input registers (must have all sensors connected or a Modbus exception will be returned):
 
 `modpoll -m rtu -b 9600 -p none -a 1 -0 -1 -t 3 -r 0 -c 14 /dev/ttyUSB0`
 
+To read SHT31 input registers:
+
+`modpoll -m rtu -b 9600 -p none -a 1 -0 -1 -t 3 -r 0 -c 6 /dev/ttyUSB0`
 ## References/Credits
 
 Some of this shamelessly copied from Adafruit libraries:
