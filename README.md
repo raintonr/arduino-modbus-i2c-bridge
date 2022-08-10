@@ -96,6 +96,23 @@ To read all input registers (must have all sensors connected or a Modbus excepti
 To read SHT31 input registers:
 
 `modpoll -m rtu -b 9600 -p none -a 1 -0 -1 -t 3 -r 0 -c 6 /dev/ttyUSB0`
+
+## Sample Installation
+
+To install in a very small space, screw terminals are useful. A ProMini328P and RS485 <-> TTL module can be connected thus:
+
+![unfolded](img/unfolded.jpg)
+
+The modules can be folded back to back and held with hot glue. In this configuration re-programming can still be accomplished by using test clips on the exposed serial connections.
+
+![folded](img/folded.jpg)
+
+This yields a very small installation package. It can easily fit inside a standard European wall box:
+
+![wallbox](img/wallbox.jpg)
+
+In this example installation power & data are provided via Cat7 cable joined inside the same box using Wago 243 connectors. A wall mounted enclosure of the installer's choice finishes the job.
+
 ## References/Credits
 
 Some of this shamelessly copied from Adafruit libraries:
